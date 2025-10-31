@@ -233,6 +233,25 @@ def plot_roc_curves(labels, predictions, probabilities, output_path):
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
 
+def plot_loss(history, output_path):
+    """Plot training and validation loss curves"""
+    plt.figure(figsize=(10, 6))
+
+    epochs = range(1, len(history['train_loss']) + 1)
+
+    plt.plot(epochs, history['train_loss'], 'b-', label='Training Loss', linewidth=2)
+    plt.plot(epochs, history['val_loss'], 'r-', label='Validation Loss', linewidth=2)
+
+    plt.xlabel('Epoch', fontsize=12)
+    plt.ylabel('Loss', fontsize=12)
+    plt.title('Training and Validation Loss', fontsize=14, fontweight='bold')
+    plt.legend(loc='upper right', fontsize=10)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    print(f"Loss plot saved to {output_path}")
+
 def plot_tsne(features, hc_pd_labels, pd_dd_labels, output_dir="plots"):
     
     if features is None or len(features) == 0:
@@ -558,6 +577,8 @@ class Model(nn.Module):
         use_text: bool = True,
         text_encoder_dim: int = 128,
         fusion_method: str = 'concat',
+        use_gradient_checkpointing: bool = True,
+        max_windows_per_chunk: int = 50,
     ):
         super().__init__()
 
@@ -566,6 +587,8 @@ class Model(nn.Module):
         self.use_text = use_text
         self.fusion_method = fusion_method
         self.num_tasks = num_tasks
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.max_windows_per_chunk = max_windows_per_chunk
 
         # ===== Window-level components (Level 1) =====
         self.left_projection = nn.Linear(input_dim, model_dim)
@@ -635,14 +658,42 @@ class Model(nn.Module):
 
     def process_window(self, left_wrist, right_wrist):
         """
-        Process a single window through window-level cross-attention.
+        Process windows through window-level cross-attention with chunking for memory efficiency.
 
         Args:
-            left_wrist: (batch_size, seq_len, input_dim)
-            right_wrist: (batch_size, seq_len, input_dim)
+            left_wrist: (num_windows, seq_len, input_dim)
+            right_wrist: (num_windows, seq_len, input_dim)
 
         Returns:
-            window_embedding: (batch_size, model_dim * 2)
+            window_embedding: (num_windows, model_dim * 2)
+        """
+        num_windows = left_wrist.size(0)
+
+        # Process in chunks if number of windows exceeds threshold
+        if num_windows > self.max_windows_per_chunk:
+            window_embeddings = []
+            for i in range(0, num_windows, self.max_windows_per_chunk):
+                end_idx = min(i + self.max_windows_per_chunk, num_windows)
+                left_chunk = left_wrist[i:end_idx]
+                right_chunk = right_wrist[i:end_idx]
+
+                chunk_embedding = self._process_window_chunk(left_chunk, right_chunk)
+                window_embeddings.append(chunk_embedding)
+
+            return torch.cat(window_embeddings, dim=0)
+        else:
+            return self._process_window_chunk(left_wrist, right_wrist)
+
+    def _process_window_chunk(self, left_wrist, right_wrist):
+        """
+        Process a chunk of windows through window-level cross-attention.
+
+        Args:
+            left_wrist: (chunk_size, seq_len, input_dim)
+            right_wrist: (chunk_size, seq_len, input_dim)
+
+        Returns:
+            window_embedding: (chunk_size, model_dim * 2)
         """
         # Project to model dimension
         left_encoded = self.left_projection(left_wrist)
@@ -655,9 +706,15 @@ class Model(nn.Module):
         left_encoded = self.dropout(left_encoded)
         right_encoded = self.dropout(right_encoded)
 
-        # Apply window-level cross-attention layers
+        # Apply window-level cross-attention layers with gradient checkpointing
         for layer in self.window_layers:
-            left_encoded, right_encoded = layer(left_encoded, right_encoded)
+            if self.use_gradient_checkpointing and self.training:
+                # Use gradient checkpointing to save memory
+                left_encoded, right_encoded = torch.utils.checkpoint.checkpoint(
+                    layer, left_encoded, right_encoded, use_reentrant=False
+                )
+            else:
+                left_encoded, right_encoded = layer(left_encoded, right_encoded)
 
         # Global pooling
         left_pool = self.global_pool(left_encoded.transpose(1, 2)).squeeze(-1)
@@ -1505,57 +1562,115 @@ def collate_fn(batch):
     return batch_data, hc_vs_pd_labels, pd_vs_dd_labels, patient_texts
 
 
-def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer, device, use_text):
+def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer, device, use_text, scaler=None):
     """Train hierarchical model for one epoch"""
     model.train()
     train_loss = 0.0
     hc_pd_train_pred, hc_pd_train_labels = [], []
     pd_dd_train_pred, pd_dd_train_labels = [], []
 
-    for batch_data, hc_pd, pd_dd, patient_texts in tqdm(dataloader, desc="Training"):
+    for batch_idx, (batch_data, hc_pd, pd_dd, patient_texts) in enumerate(tqdm(dataloader, desc="Training")):
         hc_pd = hc_pd.to(device)
         pd_dd = pd_dd.to(device)
 
         optimizer.zero_grad()
         text_input = patient_texts if use_text else None
-        hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
 
-        total_loss = 0
-        loss_count = 0
+        # Use mixed precision if scaler is provided
+        if scaler is not None:
+            with torch.cuda.amp.autocast():
+                hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
 
-        # HC vs PD loss
-        valid_hc_pd_mask = (hc_pd != -1)
-        if valid_hc_pd_mask.any():
-            valid_logits_hc = hc_pd_logits[valid_hc_pd_mask]
-            valid_labels_hc = hc_pd[valid_hc_pd_mask]
-            loss_hc = criterion_hc(valid_logits_hc, valid_labels_hc)
-            total_loss += loss_hc
-            loss_count += 1
+                total_loss = 0
+                loss_count = 0
 
-            preds_hc = torch.argmax(valid_logits_hc, dim=1)
-            hc_pd_train_pred.extend(preds_hc.cpu().numpy())
-            hc_pd_train_labels.extend(valid_labels_hc.cpu().numpy())
+                # HC vs PD loss
+                valid_hc_pd_mask = (hc_pd != -1)
+                if valid_hc_pd_mask.any():
+                    valid_logits_hc = hc_pd_logits[valid_hc_pd_mask]
+                    valid_labels_hc = hc_pd[valid_hc_pd_mask]
+                    loss_hc = criterion_hc(valid_logits_hc, valid_labels_hc)
+                    total_loss += loss_hc
+                    loss_count += 1
 
-        # PD vs DD loss
-        valid_pd_dd_mask = (pd_dd != -1)
-        if valid_pd_dd_mask.any():
-            valid_logits_pd = pd_dd_logits[valid_pd_dd_mask]
-            valid_labels_pd = pd_dd[valid_pd_dd_mask]
-            loss_pd = criterion_pd(valid_logits_pd, valid_labels_pd)
-            total_loss += loss_pd
-            loss_count += 1
+                # PD vs DD loss
+                valid_pd_dd_mask = (pd_dd != -1)
+                if valid_pd_dd_mask.any():
+                    valid_logits_pd = pd_dd_logits[valid_pd_dd_mask]
+                    valid_labels_pd = pd_dd[valid_pd_dd_mask]
+                    loss_pd = criterion_pd(valid_logits_pd, valid_labels_pd)
+                    total_loss += loss_pd
+                    loss_count += 1
 
-            preds_pd = torch.argmax(valid_logits_pd, dim=1)
-            pd_dd_train_pred.extend(preds_pd.cpu().numpy())
-            pd_dd_train_labels.extend(valid_labels_pd.cpu().numpy())
+                if loss_count > 0:
+                    avg_loss = total_loss / loss_count
+                else:
+                    avg_loss = total_loss
 
-        # Backward pass
-        if loss_count > 0:
-            avg_loss = total_loss / loss_count
-            avg_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
-            train_loss += avg_loss.item()
+            # Backward pass with gradient scaling
+            if loss_count > 0:
+                scaler.scale(avg_loss).backward()
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                scaler.step(optimizer)
+                scaler.update()
+                train_loss += avg_loss.item()
+
+                # Get predictions (outside autocast for accuracy)
+                with torch.no_grad():
+                    if valid_hc_pd_mask.any():
+                        preds_hc = torch.argmax(hc_pd_logits[valid_hc_pd_mask], dim=1)
+                        hc_pd_train_pred.extend(preds_hc.cpu().numpy())
+                        hc_pd_train_labels.extend(hc_pd[valid_hc_pd_mask].cpu().numpy())
+
+                    if valid_pd_dd_mask.any():
+                        preds_pd = torch.argmax(pd_dd_logits[valid_pd_dd_mask], dim=1)
+                        pd_dd_train_pred.extend(preds_pd.cpu().numpy())
+                        pd_dd_train_labels.extend(pd_dd[valid_pd_dd_mask].cpu().numpy())
+        else:
+            # Standard training without mixed precision
+            hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
+
+            total_loss = 0
+            loss_count = 0
+
+            # HC vs PD loss
+            valid_hc_pd_mask = (hc_pd != -1)
+            if valid_hc_pd_mask.any():
+                valid_logits_hc = hc_pd_logits[valid_hc_pd_mask]
+                valid_labels_hc = hc_pd[valid_hc_pd_mask]
+                loss_hc = criterion_hc(valid_logits_hc, valid_labels_hc)
+                total_loss += loss_hc
+                loss_count += 1
+
+                preds_hc = torch.argmax(valid_logits_hc, dim=1)
+                hc_pd_train_pred.extend(preds_hc.cpu().numpy())
+                hc_pd_train_labels.extend(valid_labels_hc.cpu().numpy())
+
+            # PD vs DD loss
+            valid_pd_dd_mask = (pd_dd != -1)
+            if valid_pd_dd_mask.any():
+                valid_logits_pd = pd_dd_logits[valid_pd_dd_mask]
+                valid_labels_pd = pd_dd[valid_pd_dd_mask]
+                loss_pd = criterion_pd(valid_logits_pd, valid_labels_pd)
+                total_loss += loss_pd
+                loss_count += 1
+
+                preds_pd = torch.argmax(valid_logits_pd, dim=1)
+                pd_dd_train_pred.extend(preds_pd.cpu().numpy())
+                pd_dd_train_labels.extend(valid_labels_pd.cpu().numpy())
+
+            # Backward pass
+            if loss_count > 0:
+                avg_loss = total_loss / loss_count
+                avg_loss.backward()
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                optimizer.step()
+                train_loss += avg_loss.item()
+
+        # Clear CUDA cache periodically to prevent memory fragmentation
+        if torch.cuda.is_available() and batch_idx % 10 == 0:
+            torch.cuda.empty_cache()
 
     train_loss /= len(dataloader)
 
@@ -1568,7 +1683,7 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
     return train_loss, train_metrics_hc, train_metrics_pd
 
 
-def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device, use_text):
+def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device, use_text, use_amp=False):
     """Validate hierarchical model for one epoch"""
     model.eval()
     val_loss = 0.0
@@ -1576,12 +1691,18 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
     pd_dd_val_pred, pd_dd_val_labels, pd_dd_val_probs = [], [], []
 
     with torch.no_grad():
-        for batch_data, hc_pd, pd_dd, patient_texts in tqdm(dataloader, desc="Validation"):
+        for batch_idx, (batch_data, hc_pd, pd_dd, patient_texts) in enumerate(tqdm(dataloader, desc="Validation")):
             hc_pd = hc_pd.to(device)
             pd_dd = pd_dd.to(device)
 
             text_input = patient_texts if use_text else None
-            hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
+
+            # Use mixed precision for inference if enabled
+            if use_amp and torch.cuda.is_available():
+                with torch.cuda.amp.autocast():
+                    hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
+            else:
+                hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
 
             total_loss = 0
             loss_count = 0
@@ -1619,6 +1740,10 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
             if loss_count > 0:
                 avg_loss = total_loss / loss_count
                 val_loss += avg_loss.item()
+
+            # Clear CUDA cache periodically
+            if torch.cuda.is_available() and batch_idx % 10 == 0:
+                torch.cuda.empty_cache()
 
     val_loss /= len(dataloader)
 
@@ -1721,15 +1846,23 @@ def train_model(config):
             seq_len=config['seq_len'],
             num_classes=config['num_classes'],
             num_tasks=config.get('num_tasks', 10),
-            use_text=config.get('use_text', False)
+            use_text=config.get('use_text', False),
+            use_gradient_checkpointing=config.get('use_gradient_checkpointing', True),
+            max_windows_per_chunk=config.get('max_windows_per_chunk', 50)
         ).to(device)
 
         print(f"\nModel: Model")
         print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
+        print(f"Gradient checkpointing: {config.get('use_gradient_checkpointing', True)}")
+        print(f"Max windows per chunk: {config.get('max_windows_per_chunk', 50)}")
+        print(f"Mixed precision (AMP): {config.get('use_amp', True) and torch.cuda.is_available()}")
 
         optimizer = optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
 
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+
+        # Initialize gradient scaler for mixed precision training
+        scaler = torch.cuda.amp.GradScaler() if (config.get('use_amp', True) and torch.cuda.is_available()) else None
 
         hc_pd_loss = nn.CrossEntropyLoss()
         pd_dd_loss = nn.CrossEntropyLoss()
@@ -1758,13 +1891,14 @@ def train_model(config):
             #############Training phase###########
             train_loss, train_metrics_hc, train_metrics_pd = train__single_epoch(
                 model, train_loader, hc_pd_loss, pd_dd_loss, optimizer,
-                device, config.get('use_text', False)
+                device, config.get('use_text', False), scaler=scaler
             )
 
             ###########Validation phase############
             val_results = validate_single_epoch(
                 model, val_loader, hc_pd_loss, pd_dd_loss,
-                device, config.get('use_text', False)
+                device, config.get('use_text', False),
+                use_amp=config.get('use_amp', True)
             )
             val_loss, hc_pd_val_pred, hc_pd_val_labels, hc_pd_val_probs, \
             pd_dd_val_pred, pd_dd_val_labels, pd_dd_val_probs = val_results
@@ -1922,11 +2056,16 @@ def main():
         'use_text': False,
 
         # Training settings
-        'batch_size': 8,  # Smaller batch size for hierarchical model (patient-level batching)
+        'batch_size': 4,  # Reduced batch size for memory efficiency (patient-level batching)
         'learning_rate': 0.0005,
         'weight_decay': 0.01,
         'num_epochs': 100,
         'num_workers': 0,
+
+        # Memory optimization settings
+        'use_amp': True,  # Use automatic mixed precision training
+        'use_gradient_checkpointing': True,  # Use gradient checkpointing to save memory
+        'max_windows_per_chunk': 50,  # Maximum windows to process at once
 
         # Output settings
         'save_metrics': True,  # Metrics will be saved as CSV
