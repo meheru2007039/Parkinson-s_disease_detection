@@ -1057,22 +1057,38 @@ class ParkinsonsDataLoader(Dataset):
                  apply_dowsampling=True,
                  apply_bandpass_filter=True, apply_prepare_text=True):
 
-        # First load data using the base loader
+        self.apply_dowsampling = apply_dowsampling
+        self.apply_bandpass_filter = apply_bandpass_filter
+        self.apply_prepare_text = apply_prepare_text
+
+        # Load data from files or use provided data
         if data_root is not None:
-            base_loader = ParkinsonsDataLoader(
-                data_root=data_root,
-                window_size=window_size,
-                apply_dowsampling=apply_dowsampling,
-                apply_bandpass_filter=apply_bandpass_filter,
-                apply_prepare_text=apply_prepare_text
-            )
-            self.left_samples = base_loader.left_samples
-            self.right_samples = base_loader.right_samples
-            self.hc_vs_pd = base_loader.hc_vs_pd
-            self.pd_vs_dd = base_loader.pd_vs_dd
-            self.patient_texts = base_loader.patient_texts
-            self.patient_ids = base_loader.patient_ids
-            self.task_names = base_loader.task_names
+            # Initialize empty arrays
+            self.left_samples = []
+            self.right_samples = []
+            self.hc_vs_pd = []
+            self.pd_vs_dd = []
+            self.patient_texts = []
+            self.patient_ids = []
+            self.task_names = []
+            self.window_size = window_size
+            self.data_root = data_root
+
+            # Set up paths
+            self.patients_template = pathlib.Path(data_root) / "patients" / "patient_{p:03d}.json"
+            self.timeseries_template = pathlib.Path(data_root) / "movement" / "timeseries" / "{N:03d}_{X}_{Y}.txt"
+            self.questionnaires_template = pathlib.Path(data_root) / "questionnaire" / "questionnaire_response_{p:03d}.json"
+
+            # Tasks
+            self.tasks = ["CrossArms", "DrinkGlas", "Entrainment", "HoldWeight", "LiftHold",
+                         "PointFinger", "Relaxed", "StretchHold", "TouchIndex", "TouchNose"]
+            self.wrists = ["LeftWrist", "RightWrist"]
+
+            self.patient_ids_list = list(range(1, 470))
+            print(f"Dataset: {len(self.patient_ids_list)} patients (001-469)")
+
+            # Load data from files
+            self._load_data()
         else:
             self.left_samples = np.array(left_samples) if not isinstance(left_samples, np.ndarray) else left_samples
             self.right_samples = np.array(right_samples) if not isinstance(right_samples, np.ndarray) else right_samples
@@ -1091,6 +1107,126 @@ class ParkinsonsDataLoader(Dataset):
 
         # Group data by patient
         self._group_by_patient()
+
+    def _load_data(self):
+        """Load data from the file system."""
+        for patient_id in tqdm(self.patient_ids_list, desc="Loading patients"):
+            patient_path = pathlib.Path(str(self.patients_template).format(p=patient_id))
+            questionnaire_path = pathlib.Path(str(self.questionnaires_template).format(p=patient_id))
+
+            if not patient_path.exists():
+                continue
+
+            try:
+                with open(patient_path, 'r') as f:
+                    metadata = json.load(f)
+
+                condition = metadata.get('condition', '')
+                questionnaire = {}
+                try:
+                    with open(questionnaire_path, 'r') as f:
+                        questionnaire = json.load(f)
+                except:
+                    pass
+
+                if self.apply_prepare_text:
+                    per_patient_text = prepare_text(metadata, questionnaire)
+                else:
+                    per_patient_text = ""
+
+                if condition == 'Healthy':
+                    hc_vs_pd_label = 0  # Healthy
+                    pd_vs_dd_label = -1  # Not applicable for PD vs DD
+                    overlap = 0.70
+                elif 'Parkinson' in condition:
+                    hc_vs_pd_label = 1
+                    pd_vs_dd_label = 0   # Parkinson's for PD vs DD
+                    overlap = 0
+                else:
+                    hc_vs_pd_label = -1  # Not applicable for HC vs PD
+                    pd_vs_dd_label = 1   # Other disorders
+                    overlap = 0.65
+
+                patient_left_samples = []
+                patient_right_samples = []
+                patient_sample_texts = []
+                patient_task_names = []
+
+                for task in self.tasks:
+                    left_path = pathlib.Path(str(self.timeseries_template).format(
+                        N=patient_id, X=task, Y="LeftWrist"))
+                    right_path = pathlib.Path(str(self.timeseries_template).format(
+                        N=patient_id, X=task, Y="RightWrist"))
+
+                    if not (left_path.exists() and right_path.exists()):
+                        continue
+
+                    try:
+                        left_data = np.loadtxt(left_path, delimiter=",")
+                        right_data = np.loadtxt(right_path, delimiter=",")
+
+                        if left_data.shape[1] > 6:
+                            left_data = left_data[:, :6]  # Take first 6 channels
+                        if left_data.shape[0] > 50:
+                            left_data = left_data[50:, :]  # Skip first 0.5 sec
+
+                        if right_data.shape[1] > 6:
+                            right_data = right_data[:, :6]
+                        if right_data.shape[0] > 50:
+                            right_data = right_data[50:, :]
+
+                        # Downsample
+                        if self.apply_dowsampling:
+                            left_data = downsample(left_data)
+                            right_data = downsample(right_data)
+
+                        if self.apply_bandpass_filter:
+                            left_data = bandpass_filter(left_data)
+                            right_data = bandpass_filter(right_data)
+
+                        if left_data is None or right_data is None:
+                            continue
+
+                        # Create windows
+                        left_windows = create_windows(left_data, self.window_size, overlap=overlap)
+                        right_windows = create_windows(right_data, self.window_size, overlap=overlap)
+
+                        if left_windows is not None and right_windows is not None:
+                            min_windows = min(len(left_windows), len(right_windows))
+
+                            for i in range(min_windows):
+                                patient_left_samples.append(left_windows[i])
+                                patient_right_samples.append(right_windows[i])
+                                patient_sample_texts.append(per_patient_text)
+                                patient_task_names.append(task)
+
+                    except Exception as e:
+                        print(f"Error loading data for patient {patient_id}, task {task}: {e}")
+                        continue
+
+                # Add all samples from this patient
+                if len(patient_left_samples) > 0:
+                    n_samples = len(patient_left_samples)
+
+                    for i in range(n_samples):
+                        self.left_samples.append(patient_left_samples[i])
+                        self.right_samples.append(patient_right_samples[i])
+                        self.patient_texts.append(patient_sample_texts[i])
+                        self.hc_vs_pd.append(hc_vs_pd_label)
+                        self.pd_vs_dd.append(pd_vs_dd_label)
+                        self.patient_ids.append(patient_id)
+                        self.task_names.append(patient_task_names[i])
+
+            except Exception as e:
+                print(f"Error loading patient {patient_id}: {e}")
+                continue
+
+        self.left_samples = np.array(self.left_samples)
+        self.right_samples = np.array(self.right_samples)
+        self.hc_vs_pd = np.array(self.hc_vs_pd)
+        self.pd_vs_dd = np.array(self.pd_vs_dd)
+        self.patient_ids = np.array(self.patient_ids)
+        self.task_names = np.array(self.task_names)
 
     def _group_by_patient(self):
         """Group windows by patient and task."""
