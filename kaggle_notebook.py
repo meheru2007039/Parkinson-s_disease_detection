@@ -559,10 +559,6 @@ class CrossAttention(nn.Module):
 
 
 class Model(nn.Module):
-    """
-    - Level 1 (Window-level): Cross-attention between left and right wrist for each window
-    - Level 2 (Task-level): Attention across windows within each task, with task embeddings
-    """
     def __init__(
         self,
         input_dim: int = 6,
@@ -657,16 +653,7 @@ class Model(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     def process_window(self, left_wrist, right_wrist):
-        """
-        Process windows through window-level cross-attention with chunking for memory efficiency.
-
-        Args:
-            left_wrist: (num_windows, seq_len, input_dim)
-            right_wrist: (num_windows, seq_len, input_dim)
-
-        Returns:
-            window_embedding: (num_windows, model_dim * 2)
-        """
+        
         num_windows = left_wrist.size(0)
 
         # Process in chunks if number of windows exceeds threshold
@@ -685,17 +672,7 @@ class Model(nn.Module):
             return self._process_window_chunk(left_wrist, right_wrist)
 
     def _process_window_chunk(self, left_wrist, right_wrist):
-        """
-        Process a chunk of windows through window-level cross-attention.
-
-        Args:
-            left_wrist: (chunk_size, seq_len, input_dim)
-            right_wrist: (chunk_size, seq_len, input_dim)
-
-        Returns:
-            window_embedding: (chunk_size, model_dim * 2)
-        """
-        # Project to model dimension
+        
         left_encoded = self.left_projection(left_wrist)
         right_encoded = self.right_projection(right_wrist)
 
@@ -706,7 +683,7 @@ class Model(nn.Module):
         left_encoded = self.dropout(left_encoded)
         right_encoded = self.dropout(right_encoded)
 
-        # Apply window-level cross-attention layers with gradient checkpointing
+        # Apply window-level cross-attention
         for layer in self.window_layers:
             if self.use_gradient_checkpointing and self.training:
                 # Use gradient checkpointing to save memory
@@ -716,11 +693,9 @@ class Model(nn.Module):
             else:
                 left_encoded, right_encoded = layer(left_encoded, right_encoded)
 
-        # Global pooling
         left_pool = self.global_pool(left_encoded.transpose(1, 2)).squeeze(-1)
         right_pool = self.global_pool(right_encoded.transpose(1, 2)).squeeze(-1)
 
-        # Concatenate left and right embeddings
         window_embedding = torch.cat([left_pool, right_pool], dim=1)
 
         return window_embedding
@@ -736,34 +711,27 @@ class Model(nn.Module):
             task_ids = sample['task_ids'].to(device)  # (num_windows,)
 
             # ===== Level 1: Window-level processing =====
-            # Process all windows through window-level cross-attention
             window_embeddings = self.process_window(left_windows, right_windows)  # (num_windows, model_dim * 2)
 
             # ===== Level 2: Task-level processing =====
-            # Group windows by task and add task embeddings
             unique_tasks = torch.unique(task_ids)
             task_representations = []
 
             for task_id in unique_tasks:
-                # Get windows for this task
+                
                 task_mask = task_ids == task_id
                 task_windows = window_embeddings[task_mask]  # (num_task_windows, model_dim * 2)
 
-                # Get task embedding
                 task_emb = self.task_embedding(task_id.unsqueeze(0))  # (1, model_dim * 2)
 
-                # Concatenate task embedding with window embeddings
-                # Add task embedding to each window
                 task_windows_with_emb = task_windows + task_emb  # Broadcasting
 
-                # Average pool windows for this task
                 task_rep = task_windows_with_emb.mean(dim=0, keepdim=True)  # (1, model_dim * 2)
                 task_representations.append(task_rep)
 
-            # Stack task representations
+            # Stack task 
             task_sequence = torch.cat(task_representations, dim=0)  # (num_tasks, model_dim * 2)
 
-            # Apply task-level attention
             task_attended, _ = self.task_attention(
                 task_sequence.unsqueeze(0),
                 task_sequence.unsqueeze(0),
@@ -1007,15 +975,11 @@ def k_fold_split_method(data_root, full_dataset, k=5):
 
 def patient_level_split_method(left_samples, right_samples, hc_vs_pd, pd_vs_dd, 
                                patient_texts, patient_ids, split_ratio=0.85):
-    """
-    Split data at patient level using stratified sampling to maintain class balance.
-    """
-    # Get unique patients and their labels
+    
     unique_patients = np.unique(patient_ids)
     patient_labels = []
     
     for pid in unique_patients:
-        # Get the label for this patient (all samples from same patient have same label)
         patient_mask = patient_ids == pid
         hc_vs_pd_label = hc_vs_pd[patient_mask][0]
         pd_vs_dd_label = pd_vs_dd[patient_mask][0]
@@ -1102,11 +1066,7 @@ def task_wise_split_method(left_samples, right_samples, hc_vs_pd, pd_vs_dd,
     return train_data, test_data
 
 class ParkinsonsDataLoader(Dataset):
-    """
-    Hierarchical data loader that groups windows by patient and task.
-
-    Each sample represents one patient with all their windows grouped by task.
-    """
+    
     def __init__(self, data_root: str = None, window_size: int = 256,
                  left_samples=None, right_samples=None,
                  hc_vs_pd=None, pd_vs_dd=None, patient_texts=None,
@@ -1373,9 +1333,9 @@ class ParkinsonsDataLoader(Dataset):
                 task_names=test_data['task_names']
             )
 
-            print(f"\nHierarchical patient-level split:")
-            print(f"  Train: {len(train_patients)} patients, {len(train_dataset)} samples")
-            print(f"  Test: {len(test_patients)} patients, {len(test_dataset)} samples")
+            print(f"\npatient-level split:")
+            print(f"  Train: {len(train_patients)} patient")
+            print(f"  Test: {len(test_patients)} patients")
 
             return train_dataset, test_dataset
 
@@ -1430,7 +1390,7 @@ class ParkinsonsDataLoader(Dataset):
                     task_names=test_data['task_names']
                 )
 
-                print(f"\nHierarchical Fold {fold_id+1}/{k}:")
+                print(f"\nFold {fold_id+1}/{k}:")
                 print(f"  Train: {len(train_patients)} patients, {len(train_dataset)} samples")
                 print(f"  Test: {len(test_patients)} patients, {len(test_dataset)} samples")
 
@@ -1536,10 +1496,6 @@ def extract_features(model, dataloader, device, use_text):
     return all_features, all_hc_pd_labels, all_pd_dd_labels
 
 def collate_fn(batch):
-    """
-    Custom collate function for hierarchical data loader.
-    Since each patient has different number of windows, we return a list.
-    """
     batch_data = []
     hc_vs_pd_labels = []
     pd_vs_dd_labels = []
@@ -1563,7 +1519,6 @@ def collate_fn(batch):
 
 
 def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer, device, use_text, scaler=None):
-    """Train hierarchical model for one epoch"""
     model.train()
     train_loss = 0.0
     hc_pd_train_pred, hc_pd_train_labels = [], []
@@ -1607,7 +1562,6 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
                 else:
                     avg_loss = total_loss
 
-            # Backward pass with gradient scaling
             if loss_count > 0:
                 scaler.scale(avg_loss).backward()
                 scaler.unscale_(optimizer)
@@ -1616,7 +1570,6 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
                 scaler.update()
                 train_loss += avg_loss.item()
 
-                # Get predictions (outside autocast for accuracy)
                 with torch.no_grad():
                     if valid_hc_pd_mask.any():
                         preds_hc = torch.argmax(hc_pd_logits[valid_hc_pd_mask], dim=1)
@@ -1684,7 +1637,6 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
 
 
 def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device, use_text, use_amp=False):
-    """Validate hierarchical model for one epoch"""
     model.eval()
     val_loss = 0.0
     hc_pd_val_pred, hc_pd_val_labels, hc_pd_val_probs = [], [], []
@@ -1752,7 +1704,6 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
 
 
 def extract_features(model, dataloader, device, use_text):
-    """Extract features from hierarchical model"""
     model.eval()
     all_features = []
     all_hc_pd_labels = []
@@ -1776,17 +1727,11 @@ def extract_features(model, dataloader, device, use_text):
 
 
 def train_model(config):
-    """Train the hierarchical attention model"""
-
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
-    print("\n" + "="*70)
-    print("TRAINING HIERARCHICAL DUAL-CHANNEL TRANSFORMER")
-    print("="*70)
-
     os.makedirs("metrics", exist_ok=True)
 
-    # Load dataset using ParkinsonsDataLoader
+    # Load dataset 
     full_dataset = ParkinsonsDataLoader(
         config['data_root'],
         apply_dowsampling=config['apply_downsampling'],
@@ -1972,7 +1917,7 @@ def train_model(config):
                     best_pd_dd_preds = np.array(pd_dd_val_pred)
                     best_pd_dd_labels = np.array(pd_dd_val_labels)
 
-                model_save_name = f'hierarchical_best_model{"_fold_" + str(fold_idx+1) if num_folds > 1 else ""}.pth'
+                model_save_name = f'best_model{"_fold_" + str(fold_idx+1) if num_folds > 1 else ""}.pth'
                 torch.save({
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
@@ -1989,7 +1934,6 @@ def train_model(config):
             fold_suffix = f"_fold_{fold_idx+1}" if num_folds > 1 else ""
 
             if fold_metrics_hc and fold_metrics_pd:
-                # Use CSV format instead of text
                 save_fold_metric(fold_idx, fold_suffix, best_epoch, best_val_acc,
                                     fold_metrics_hc, fold_metrics_pd)
 
@@ -2007,7 +1951,7 @@ def train_model(config):
         all_fold_results.append(fold_result)
 
         if config.get('create_plots', True):
-            plot_dir = f"plots/hierarchical_{'fold_' + str(fold_idx+1) if num_folds > 1 else 'single_run'}"
+            plot_dir = f"plots/model_{'fold_' + str(fold_idx+1) if num_folds > 1 else 'single_run'}"
             os.makedirs(plot_dir, exist_ok=True)
 
             plot_loss(history, f"{plot_dir}/loss.png")
@@ -2029,7 +1973,6 @@ def train_model(config):
 
 
 def main():
-    """Main function for training hierarchical attention model"""
 
     config = {
         # Data settings
@@ -2037,13 +1980,12 @@ def main():
         'apply_downsampling': True,
         'apply_bandpass_filter': True,
         'apply_prepare_text': False,
-
-        # Split settings
+        
+        
         'split_type': 3,  # 1=patient-level, 3=k-fold
         'split_ratio': 0.85,
         'num_folds': 5,
 
-        # Model architecture
         'input_dim': 6,
         'model_dim': 64,
         'num_heads': 8,
@@ -2052,23 +1994,23 @@ def main():
         'dropout': 0.2,
         'seq_len': 256,
         'num_classes': 2,
-        'num_tasks': 10,  # Number of tasks for hierarchical attention
+        'num_tasks': 10,  # Number of tasks for task level attention
         'use_text': False,
 
         # Training settings
-        'batch_size': 4,  # Reduced batch size for memory efficiency (patient-level batching)
+        'batch_size': 4,  
         'learning_rate': 0.0005,
         'weight_decay': 0.01,
         'num_epochs': 100,
         'num_workers': 0,
 
         # Memory optimization settings
-        'use_amp': True,  # Use automatic mixed precision training
-        'use_gradient_checkpointing': True,  # Use gradient checkpointing to save memory
-        'max_windows_per_chunk': 50,  # Maximum windows to process at once
+        'use_amp': True,  
+        'use_gradient_checkpointing': True,  
+        'max_windows_per_chunk': 50,  
 
         # Output settings
-        'save_metrics': True,  # Metrics will be saved as CSV
+        'save_metrics': True,  
         'create_plots': True,
     }
     results = train_model(config)
