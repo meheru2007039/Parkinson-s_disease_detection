@@ -1505,20 +1505,35 @@ def collate_fn(batch):
     return batch_data, hc_vs_pd_labels, pd_vs_dd_labels, patient_texts
 
 
-def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer, device, use_text):
+def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer, device, use_text, epoch_num=0):
     """Train hierarchical model for one epoch"""
     model.train()
     train_loss = 0.0
     hc_pd_train_pred, hc_pd_train_labels = [], []
     pd_dd_train_pred, pd_dd_train_labels = [], []
 
+    # Debugging variables
+    batch_count = 0
+    total_grad_norm = 0.0
+    debug_first_batch = True
+
     for batch_data, hc_pd, pd_dd, patient_texts in tqdm(dataloader, desc="Training"):
         hc_pd = hc_pd.to(device)
         pd_dd = pd_dd.to(device)
 
+        # DEBUG: Print batch info for first batch
+        if debug_first_batch and epoch_num <= 2:
+            print(f"\n[DEBUG Epoch {epoch_num}] Batch 0 - HC labels: {hc_pd.cpu().numpy()}")
+            print(f"[DEBUG Epoch {epoch_num}] Batch 0 - DD labels: {pd_dd.cpu().numpy()}")
+
         optimizer.zero_grad()
         text_input = patient_texts if use_text else None
         hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
+
+        # DEBUG: Print logits for first batch
+        if debug_first_batch and epoch_num <= 2:
+            print(f"[DEBUG Epoch {epoch_num}] HC logits shape: {hc_pd_logits.shape}, sample: {hc_pd_logits[:2].detach().cpu().numpy()}")
+            print(f"[DEBUG Epoch {epoch_num}] DD logits shape: {pd_dd_logits.shape}, sample: {pd_dd_logits[:2].detach().cpu().numpy()}")
 
         total_loss = 0
         loss_count = 0
@@ -1533,6 +1548,12 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
             loss_count += 1
 
             preds_hc = torch.argmax(valid_logits_hc, dim=1)
+
+            # DEBUG: Print predictions for first batch
+            if debug_first_batch and epoch_num <= 2:
+                print(f"[DEBUG Epoch {epoch_num}] HC predictions: {preds_hc.cpu().numpy()}, labels: {valid_labels_hc.cpu().numpy()}")
+                print(f"[DEBUG Epoch {epoch_num}] HC loss: {loss_hc.item():.4f}")
+
             hc_pd_train_pred.extend(preds_hc.cpu().numpy())
             hc_pd_train_labels.extend(valid_labels_hc.cpu().numpy())
 
@@ -1546,6 +1567,12 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
             loss_count += 1
 
             preds_pd = torch.argmax(valid_logits_pd, dim=1)
+
+            # DEBUG: Print predictions for first batch
+            if debug_first_batch and epoch_num <= 2:
+                print(f"[DEBUG Epoch {epoch_num}] DD predictions: {preds_pd.cpu().numpy()}, labels: {valid_labels_pd.cpu().numpy()}")
+                print(f"[DEBUG Epoch {epoch_num}] DD loss: {loss_pd.item():.4f}")
+
             pd_dd_train_pred.extend(preds_pd.cpu().numpy())
             pd_dd_train_labels.extend(valid_labels_pd.cpu().numpy())
 
@@ -1553,11 +1580,33 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
         if loss_count > 0:
             avg_loss = total_loss / loss_count
             avg_loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
+            # Check gradient norms
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+            total_grad_norm += grad_norm.item()
+
+            # DEBUG: Print gradient info for first batch
+            if debug_first_batch and epoch_num <= 2:
+                print(f"[DEBUG Epoch {epoch_num}] Gradient norm: {grad_norm.item():.6f}")
+                print(f"[DEBUG Epoch {epoch_num}] Avg loss: {avg_loss.item():.4f}")
+
             optimizer.step()
             train_loss += avg_loss.item()
 
+            # DEBUG: Check if weights are updating (first batch only)
+            if debug_first_batch and epoch_num <= 2:
+                first_param = next(model.parameters())
+                print(f"[DEBUG Epoch {epoch_num}] First param sample after update: {first_param.view(-1)[:5].detach().cpu().numpy()}")
+                debug_first_batch = False
+
+        batch_count += 1
+
     train_loss /= len(dataloader)
+    avg_grad_norm = total_grad_norm / len(dataloader)
+
+    print(f"\n[DEBUG Epoch {epoch_num}] Average gradient norm: {avg_grad_norm:.6f}")
+    print(f"[DEBUG Epoch {epoch_num}] Prediction distribution - HC: {np.bincount(hc_pd_train_pred, minlength=2)}, Labels: {np.bincount(hc_pd_train_labels, minlength=2)}")
+    print(f"[DEBUG Epoch {epoch_num}] Prediction distribution - DD: {np.bincount(pd_dd_train_pred, minlength=2)}, Labels: {np.bincount(pd_dd_train_labels, minlength=2)}")
 
     # Calculate training metrics
     train_metrics_hc = calculate_metrics(hc_pd_train_labels, hc_pd_train_pred,
@@ -1568,20 +1617,32 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
     return train_loss, train_metrics_hc, train_metrics_pd
 
 
-def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device, use_text):
+def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device, use_text, epoch_num=0):
     """Validate hierarchical model for one epoch"""
     model.eval()
     val_loss = 0.0
     hc_pd_val_pred, hc_pd_val_labels, hc_pd_val_probs = [], [], []
     pd_dd_val_pred, pd_dd_val_labels, pd_dd_val_probs = [], [], []
 
+    debug_first_batch = True
+
     with torch.no_grad():
         for batch_data, hc_pd, pd_dd, patient_texts in tqdm(dataloader, desc="Validation"):
             hc_pd = hc_pd.to(device)
             pd_dd = pd_dd.to(device)
 
+            # DEBUG: Print batch info for first batch
+            if debug_first_batch and epoch_num <= 2:
+                print(f"\n[DEBUG VAL Epoch {epoch_num}] Batch 0 - HC labels: {hc_pd.cpu().numpy()}")
+                print(f"[DEBUG VAL Epoch {epoch_num}] Batch 0 - DD labels: {pd_dd.cpu().numpy()}")
+
             text_input = patient_texts if use_text else None
             hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
+
+            # DEBUG: Print logits for first batch
+            if debug_first_batch and epoch_num <= 2:
+                print(f"[DEBUG VAL Epoch {epoch_num}] HC logits sample: {hc_pd_logits[:2].cpu().numpy()}")
+                print(f"[DEBUG VAL Epoch {epoch_num}] DD logits sample: {pd_dd_logits[:2].cpu().numpy()}")
 
             total_loss = 0
             loss_count = 0
@@ -1597,6 +1658,12 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
 
                 preds_hc = torch.argmax(valid_logits_hc, dim=1)
                 probs_hc = F.softmax(valid_logits_hc, dim=1)[:, 1]
+
+                # DEBUG: Print predictions for first batch
+                if debug_first_batch and epoch_num <= 2:
+                    print(f"[DEBUG VAL Epoch {epoch_num}] HC predictions: {preds_hc.cpu().numpy()}, labels: {valid_labels_hc.cpu().numpy()}")
+                    print(f"[DEBUG VAL Epoch {epoch_num}] HC probs: {probs_hc.cpu().numpy()}")
+
                 hc_pd_val_pred.extend(preds_hc.cpu().numpy())
                 hc_pd_val_labels.extend(valid_labels_hc.cpu().numpy())
                 hc_pd_val_probs.extend(probs_hc.cpu().numpy())
@@ -1612,6 +1679,13 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
 
                 preds_pd = torch.argmax(valid_logits_pd, dim=1)
                 probs_pd = F.softmax(valid_logits_pd, dim=1)[:, 1]
+
+                # DEBUG: Print predictions for first batch
+                if debug_first_batch and epoch_num <= 2:
+                    print(f"[DEBUG VAL Epoch {epoch_num}] DD predictions: {preds_pd.cpu().numpy()}, labels: {valid_labels_pd.cpu().numpy()}")
+                    print(f"[DEBUG VAL Epoch {epoch_num}] DD probs: {probs_pd.cpu().numpy()}")
+                    debug_first_batch = False
+
                 pd_dd_val_pred.extend(preds_pd.cpu().numpy())
                 pd_dd_val_labels.extend(valid_labels_pd.cpu().numpy())
                 pd_dd_val_probs.extend(probs_pd.cpu().numpy())
@@ -1621,6 +1695,9 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
                 val_loss += avg_loss.item()
 
     val_loss /= len(dataloader)
+
+    print(f"\n[DEBUG VAL Epoch {epoch_num}] Prediction distribution - HC: {np.bincount(hc_pd_val_pred, minlength=2)}, Labels: {np.bincount(hc_pd_val_labels, minlength=2)}")
+    print(f"[DEBUG VAL Epoch {epoch_num}] Prediction distribution - DD: {np.bincount(pd_dd_val_pred, minlength=2)}, Labels: {np.bincount(pd_dd_val_labels, minlength=2)}")
 
     return (val_loss, hc_pd_val_pred, hc_pd_val_labels, hc_pd_val_probs,
             pd_dd_val_pred, pd_dd_val_labels, pd_dd_val_probs)
@@ -1758,13 +1835,13 @@ def train_model(config):
             #############Training phase###########
             train_loss, train_metrics_hc, train_metrics_pd = train__single_epoch(
                 model, train_loader, hc_pd_loss, pd_dd_loss, optimizer,
-                device, config.get('use_text', False)
+                device, config.get('use_text', False), epoch_num=epoch+1
             )
 
             ###########Validation phase############
             val_results = validate_single_epoch(
                 model, val_loader, hc_pd_loss, pd_dd_loss,
-                device, config.get('use_text', False)
+                device, config.get('use_text', False), epoch_num=epoch+1
             )
             val_loss, hc_pd_val_pred, hc_pd_val_labels, hc_pd_val_probs, \
             pd_dd_val_pred, pd_dd_val_labels, pd_dd_val_probs = val_results
