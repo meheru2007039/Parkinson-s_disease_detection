@@ -34,6 +34,111 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore")
 
 # ============================================================================
+# DEBUGGING HELPERS
+# ============================================================================
+
+def debug_print_batch_info(batch_idx, hc_pd, pd_dd, hc_pd_logits, pd_dd_logits, phase="Training"):
+    """Print detailed batch information for debugging"""
+    if batch_idx % 10 == 0:  # Print every 10 batches
+        print(f"\n[DEBUG {phase} Batch {batch_idx}]")
+
+        # HC vs PD info
+        valid_hc_pd = (hc_pd != -1)
+        if valid_hc_pd.any():
+            valid_labels = hc_pd[valid_hc_pd]
+            valid_logits = hc_pd_logits[valid_hc_pd]
+            preds = torch.argmax(valid_logits, dim=1)
+            probs = F.softmax(valid_logits, dim=1)
+
+            print(f"  HC vs PD:")
+            print(f"    Labels: {valid_labels.cpu().numpy()}")
+            print(f"    Predictions: {preds.cpu().numpy()}")
+            print(f"    Label distribution: 0={torch.sum(valid_labels==0).item()}, 1={torch.sum(valid_labels==1).item()}")
+            print(f"    Pred distribution: 0={torch.sum(preds==0).item()}, 1={torch.sum(preds==1).item()}")
+            print(f"    Logits range: [{valid_logits.min().item():.3f}, {valid_logits.max().item():.3f}]")
+            print(f"    Prob class 0: mean={probs[:, 0].mean().item():.3f}, std={probs[:, 0].std().item():.3f}")
+            print(f"    Prob class 1: mean={probs[:, 1].mean().item():.3f}, std={probs[:, 1].std().item():.3f}")
+
+        # PD vs DD info
+        valid_pd_dd = (pd_dd != -1)
+        if valid_pd_dd.any():
+            valid_labels = pd_dd[valid_pd_dd]
+            valid_logits = pd_dd_logits[valid_pd_dd]
+            preds = torch.argmax(valid_logits, dim=1)
+            probs = F.softmax(valid_logits, dim=1)
+
+            print(f"  PD vs DD:")
+            print(f"    Labels: {valid_labels.cpu().numpy()}")
+            print(f"    Predictions: {preds.cpu().numpy()}")
+            print(f"    Label distribution: 0={torch.sum(valid_labels==0).item()}, 1={torch.sum(valid_labels==1).item()}")
+            print(f"    Pred distribution: 0={torch.sum(preds==0).item()}, 1={torch.sum(preds==1).item()}")
+            print(f"    Logits range: [{valid_logits.min().item():.3f}, {valid_logits.max().item():.3f}]")
+            print(f"    Prob class 0: mean={probs[:, 0].mean().item():.3f}, std={probs[:, 0].std().item():.3f}")
+            print(f"    Prob class 1: mean={probs[:, 1].mean().item():.3f}, std={probs[:, 1].std().item():.3f}")
+
+def debug_model_weights(model, epoch):
+    """Check if model weights are changing"""
+    if epoch % 5 == 0:  # Check every 5 epochs
+        print(f"\n[DEBUG Model Weights at Epoch {epoch}]")
+
+        # Check classification heads
+        for name, param in model.head_hc_vs_pd.named_parameters():
+            if 'weight' in name:
+                print(f"  HC vs PD head {name}: mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+
+        for name, param in model.head_pd_vs_dd.named_parameters():
+            if 'weight' in name:
+                print(f"  PD vs DD head {name}: mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+
+        # Check gradients
+        hc_grad_norm = 0
+        pd_grad_norm = 0
+        for param in model.head_hc_vs_pd.parameters():
+            if param.grad is not None:
+                hc_grad_norm += param.grad.data.norm(2).item()
+        for param in model.head_pd_vs_dd.parameters():
+            if param.grad is not None:
+                pd_grad_norm += param.grad.data.norm(2).item()
+
+        print(f"  HC vs PD head gradient norm: {hc_grad_norm:.6f}")
+        print(f"  PD vs DD head gradient norm: {pd_grad_norm:.6f}")
+
+def debug_dataset_info(train_dataset, val_dataset, fold_idx=None):
+    """Print dataset statistics"""
+    print(f"\n[DEBUG Dataset Info{' Fold ' + str(fold_idx+1) if fold_idx is not None else ''}]")
+
+    # Count labels in training set
+    train_hc = np.sum(train_dataset.hc_vs_pd == 0)
+    train_pd_only = np.sum((train_dataset.hc_vs_pd == 1) & (train_dataset.pd_vs_dd == 0))
+    train_dd = np.sum(train_dataset.pd_vs_dd == 1)
+
+    val_hc = np.sum(val_dataset.hc_vs_pd == 0)
+    val_pd_only = np.sum((val_dataset.hc_vs_pd == 1) & (val_dataset.pd_vs_dd == 0))
+    val_dd = np.sum(val_dataset.pd_vs_dd == 1)
+
+    print(f"  Training set: {len(train_dataset)} samples")
+    print(f"    HC: {train_hc}, PD: {train_pd_only}, DD: {train_dd}")
+    print(f"    HC vs PD task: HC={train_hc}, PD={train_pd_only}")
+    print(f"    PD vs DD task: PD={train_pd_only}, DD={train_dd}")
+
+    print(f"  Validation set: {len(val_dataset)} samples")
+    print(f"    HC: {val_hc}, PD: {val_pd_only}, DD: {val_dd}")
+    print(f"    HC vs PD task: HC={val_hc}, PD={val_pd_only}")
+    print(f"    PD vs DD task: PD={val_pd_only}, DD={val_dd}")
+
+    # Check class balance
+    train_hc_pd_ratio = train_pd_only / (train_hc + 0.001)
+    val_hc_pd_ratio = val_pd_only / (val_hc + 0.001)
+    train_pd_dd_ratio = train_dd / (train_pd_only + 0.001)
+    val_pd_dd_ratio = val_dd / (val_pd_only + 0.001)
+
+    print(f"\n  Class imbalance ratios:")
+    print(f"    Train HC vs PD: {train_hc_pd_ratio:.2f}:1 (PD:HC)")
+    print(f"    Val HC vs PD: {val_hc_pd_ratio:.2f}:1 (PD:HC)")
+    print(f"    Train PD vs DD: {train_pd_dd_ratio:.2f}:1 (DD:PD)")
+    print(f"    Val PD vs DD: {val_pd_dd_ratio:.2f}:1 (DD:PD)")
+
+# ============================================================================
 # EVALUATION AND METRICS
 # ============================================================================
 
@@ -79,7 +184,13 @@ def calculate_metrics(y_true, y_pred, task_name="", verbose=True):
         
         print("Confusion Matrix:")
         print(cm)
-    
+
+        # DEBUG: Additional analysis when model predicts only one class
+        unique_preds = np.unique(y_pred)
+        if len(unique_preds) == 1:
+            print(f"[WARNING] Model is only predicting class {unique_preds[0]}!")
+            print(f"True label distribution: {dict(zip(*np.unique(y_true, return_counts=True)))}")
+
     return metrics
 
 def save_fold_metric(fold_idx, fold_suffix, best_epoch, best_val_acc,
@@ -558,6 +669,8 @@ class Model(nn.Module):
         use_text: bool = True,
         text_encoder_dim: int = 128,
         fusion_method: str = 'concat',
+        use_gradient_checkpointing: bool = True,
+        max_windows_per_chunk: int = 50,
     ):
         super().__init__()
 
@@ -566,6 +679,8 @@ class Model(nn.Module):
         self.use_text = use_text
         self.fusion_method = fusion_method
         self.num_tasks = num_tasks
+        self.use_gradient_checkpointing = use_gradient_checkpointing
+        self.max_windows_per_chunk = max_windows_per_chunk
 
         # ===== Window-level components (Level 1) =====
         self.left_projection = nn.Linear(input_dim, model_dim)
@@ -616,11 +731,12 @@ class Model(nn.Module):
         else:
             fusion_dim = model_dim * 2
 
-        # ===== Classification heads =====
+        # ===== Classification heads with batch normalization =====
         self.head_hc_vs_pd = nn.Sequential(
             nn.Linear(fusion_dim, model_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
+            nn.BatchNorm1d(model_dim),  # Add batch norm for stability
             nn.Linear(model_dim, 2)  # Binary: HC vs PD
         )
 
@@ -628,22 +744,54 @@ class Model(nn.Module):
             nn.Linear(fusion_dim, model_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
+            nn.BatchNorm1d(model_dim),  # Add batch norm for stability
             nn.Linear(model_dim, 2)  # Binary: PD vs DD
         )
 
+        # Initialize classification heads properly
+        self._init_classification_heads()
+
         self.dropout = nn.Dropout(dropout)
+
+    def _init_classification_heads(self):
+        """Initialize classification heads with small random weights"""
+        for module in [self.head_hc_vs_pd, self.head_pd_vs_dd]:
+            for layer in module:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_normal_(layer.weight, gain=0.1)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
 
     def process_window(self, left_wrist, right_wrist):
         """
-        Process a single window through window-level cross-attention.
+        Process windows through window-level cross-attention with chunking.
 
         Args:
-            left_wrist: (batch_size, seq_len, input_dim)
-            right_wrist: (batch_size, seq_len, input_dim)
+            left_wrist: (num_windows, seq_len, input_dim)
+            right_wrist: (num_windows, seq_len, input_dim)
 
         Returns:
-            window_embedding: (batch_size, model_dim * 2)
+            window_embedding: (num_windows, model_dim * 2)
         """
+        num_windows = left_wrist.size(0)
+
+        # Process in chunks if too many windows
+        if num_windows > self.max_windows_per_chunk:
+            window_embeddings = []
+            for i in range(0, num_windows, self.max_windows_per_chunk):
+                end_idx = min(i + self.max_windows_per_chunk, num_windows)
+                left_chunk = left_wrist[i:end_idx]
+                right_chunk = right_wrist[i:end_idx]
+
+                chunk_embedding = self._process_window_chunk(left_chunk, right_chunk)
+                window_embeddings.append(chunk_embedding)
+
+            return torch.cat(window_embeddings, dim=0)
+        else:
+            return self._process_window_chunk(left_wrist, right_wrist)
+
+    def _process_window_chunk(self, left_wrist, right_wrist):
+        """Process a chunk of windows"""
         # Project to model dimension
         left_encoded = self.left_projection(left_wrist)
         right_encoded = self.right_projection(right_wrist)
@@ -655,9 +803,14 @@ class Model(nn.Module):
         left_encoded = self.dropout(left_encoded)
         right_encoded = self.dropout(right_encoded)
 
-        # Apply window-level cross-attention layers
+        # Apply window-level cross-attention layers with optional gradient checkpointing
         for layer in self.window_layers:
-            left_encoded, right_encoded = layer(left_encoded, right_encoded)
+            if self.use_gradient_checkpointing and self.training:
+                left_encoded, right_encoded = torch.utils.checkpoint.checkpoint(
+                    layer, left_encoded, right_encoded, use_reentrant=False
+                )
+            else:
+                left_encoded, right_encoded = layer(left_encoded, right_encoded)
 
         # Global pooling
         left_pool = self.global_pool(left_encoded.transpose(1, 2)).squeeze(-1)
@@ -1505,7 +1658,7 @@ def collate_fn(batch):
     return batch_data, hc_vs_pd_labels, pd_vs_dd_labels, patient_texts
 
 
-def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer, device, use_text, epoch_num=0):
+def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer, device, use_text, epoch_num=0, scaler=None):
     """Train hierarchical model for one epoch"""
     model.train()
     train_loss = 0.0
@@ -1515,104 +1668,153 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
     # Debugging variables
     batch_count = 0
     total_grad_norm = 0.0
-    debug_first_batch = True
+    hc_loss_total = 0.0
+    pd_loss_total = 0.0
+    hc_batch_count = 0
+    pd_batch_count = 0
 
-    for batch_data, hc_pd, pd_dd, patient_texts in tqdm(dataloader, desc="Training"):
+    for batch_idx, (batch_data, hc_pd, pd_dd, patient_texts) in enumerate(tqdm(dataloader, desc="Training")):
         hc_pd = hc_pd.to(device)
         pd_dd = pd_dd.to(device)
 
-        # DEBUG: Print batch info for first batch
-        if debug_first_batch and epoch_num <= 2:
-            print(f"\n[DEBUG Epoch {epoch_num}] Batch 0 - HC labels: {hc_pd.cpu().numpy()}")
-            print(f"[DEBUG Epoch {epoch_num}] Batch 0 - DD labels: {pd_dd.cpu().numpy()}")
-
         optimizer.zero_grad()
         text_input = patient_texts if use_text else None
-        hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
 
-        # DEBUG: Print logits for first batch
-        if debug_first_batch and epoch_num <= 2:
-            print(f"[DEBUG Epoch {epoch_num}] HC logits shape: {hc_pd_logits.shape}, sample: {hc_pd_logits[:2].detach().cpu().numpy()}")
-            print(f"[DEBUG Epoch {epoch_num}] DD logits shape: {pd_dd_logits.shape}, sample: {pd_dd_logits[:2].detach().cpu().numpy()}")
+        # Use mixed precision if scaler provided
+        if scaler is not None:
+            with torch.cuda.amp.autocast():
+                hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
 
-        total_loss = 0
-        loss_count = 0
+                # Debug print every 10 batches
+                if epoch_num <= 3:
+                    debug_print_batch_info(batch_idx, hc_pd, pd_dd, hc_pd_logits, pd_dd_logits, "Training")
 
-        # HC vs PD loss
-        valid_hc_pd_mask = (hc_pd != -1)
-        if valid_hc_pd_mask.any():
-            valid_logits_hc = hc_pd_logits[valid_hc_pd_mask]
-            valid_labels_hc = hc_pd[valid_hc_pd_mask]
-            loss_hc = criterion_hc(valid_logits_hc, valid_labels_hc)
-            total_loss += loss_hc
-            loss_count += 1
+                total_loss = 0
+                loss_count = 0
 
-            preds_hc = torch.argmax(valid_logits_hc, dim=1)
+                # HC vs PD loss
+                valid_hc_pd_mask = (hc_pd != -1)
+                if valid_hc_pd_mask.any():
+                    valid_logits_hc = hc_pd_logits[valid_hc_pd_mask]
+                    valid_labels_hc = hc_pd[valid_hc_pd_mask]
+                    loss_hc = criterion_hc(valid_logits_hc, valid_labels_hc)
+                    total_loss += loss_hc
+                    loss_count += 1
+                    hc_loss_total += loss_hc.item()
+                    hc_batch_count += 1
 
-            # DEBUG: Print predictions for first batch
-            if debug_first_batch and epoch_num <= 2:
-                print(f"[DEBUG Epoch {epoch_num}] HC predictions: {preds_hc.cpu().numpy()}, labels: {valid_labels_hc.cpu().numpy()}")
-                print(f"[DEBUG Epoch {epoch_num}] HC loss: {loss_hc.item():.4f}")
+                    preds_hc = torch.argmax(valid_logits_hc, dim=1)
+                    hc_pd_train_pred.extend(preds_hc.cpu().numpy())
+                    hc_pd_train_labels.extend(valid_labels_hc.cpu().numpy())
 
-            hc_pd_train_pred.extend(preds_hc.cpu().numpy())
-            hc_pd_train_labels.extend(valid_labels_hc.cpu().numpy())
+                # PD vs DD loss
+                valid_pd_dd_mask = (pd_dd != -1)
+                if valid_pd_dd_mask.any():
+                    valid_logits_pd = pd_dd_logits[valid_pd_dd_mask]
+                    valid_labels_pd = pd_dd[valid_pd_dd_mask]
+                    loss_pd = criterion_pd(valid_logits_pd, valid_labels_pd)
+                    total_loss += loss_pd
+                    loss_count += 1
+                    pd_loss_total += loss_pd.item()
+                    pd_batch_count += 1
 
-        # PD vs DD loss
-        valid_pd_dd_mask = (pd_dd != -1)
-        if valid_pd_dd_mask.any():
-            valid_logits_pd = pd_dd_logits[valid_pd_dd_mask]
-            valid_labels_pd = pd_dd[valid_pd_dd_mask]
-            loss_pd = criterion_pd(valid_logits_pd, valid_labels_pd)
-            total_loss += loss_pd
-            loss_count += 1
+                    preds_pd = torch.argmax(valid_logits_pd, dim=1)
+                    pd_dd_train_pred.extend(preds_pd.cpu().numpy())
+                    pd_dd_train_labels.extend(valid_labels_pd.cpu().numpy())
 
-            preds_pd = torch.argmax(valid_logits_pd, dim=1)
+                if loss_count > 0:
+                    avg_loss = total_loss / loss_count
+                else:
+                    avg_loss = total_loss
 
-            # DEBUG: Print predictions for first batch
-            if debug_first_batch and epoch_num <= 2:
-                print(f"[DEBUG Epoch {epoch_num}] DD predictions: {preds_pd.cpu().numpy()}, labels: {valid_labels_pd.cpu().numpy()}")
-                print(f"[DEBUG Epoch {epoch_num}] DD loss: {loss_pd.item():.4f}")
+            # Backward pass with gradient scaling
+            if loss_count > 0:
+                scaler.scale(avg_loss).backward()
+                scaler.unscale_(optimizer)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                total_grad_norm += grad_norm.item()
+                scaler.step(optimizer)
+                scaler.update()
+                train_loss += avg_loss.item()
 
-            pd_dd_train_pred.extend(preds_pd.cpu().numpy())
-            pd_dd_train_labels.extend(valid_labels_pd.cpu().numpy())
+        else:
+            # Standard training without mixed precision
+            hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
 
-        # Backward pass
-        if loss_count > 0:
-            avg_loss = total_loss / loss_count
-            avg_loss.backward()
+            # Debug print every 10 batches
+            if epoch_num <= 3:
+                debug_print_batch_info(batch_idx, hc_pd, pd_dd, hc_pd_logits, pd_dd_logits, "Training")
 
-            # Check gradient norms
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            total_grad_norm += grad_norm.item()
+            total_loss = 0
+            loss_count = 0
 
-            # DEBUG: Print gradient info for first batch
-            if debug_first_batch and epoch_num <= 2:
-                print(f"[DEBUG Epoch {epoch_num}] Gradient norm: {grad_norm.item():.6f}")
-                print(f"[DEBUG Epoch {epoch_num}] Avg loss: {avg_loss.item():.4f}")
+            # HC vs PD loss
+            valid_hc_pd_mask = (hc_pd != -1)
+            if valid_hc_pd_mask.any():
+                valid_logits_hc = hc_pd_logits[valid_hc_pd_mask]
+                valid_labels_hc = hc_pd[valid_hc_pd_mask]
+                loss_hc = criterion_hc(valid_logits_hc, valid_labels_hc)
+                total_loss += loss_hc
+                loss_count += 1
+                hc_loss_total += loss_hc.item()
+                hc_batch_count += 1
 
-            optimizer.step()
-            train_loss += avg_loss.item()
+                preds_hc = torch.argmax(valid_logits_hc, dim=1)
+                hc_pd_train_pred.extend(preds_hc.cpu().numpy())
+                hc_pd_train_labels.extend(valid_labels_hc.cpu().numpy())
 
-            # DEBUG: Check if weights are updating (first batch only)
-            if debug_first_batch and epoch_num <= 2:
-                first_param = next(model.parameters())
-                print(f"[DEBUG Epoch {epoch_num}] First param sample after update: {first_param.view(-1)[:5].detach().cpu().numpy()}")
-                debug_first_batch = False
+            # PD vs DD loss
+            valid_pd_dd_mask = (pd_dd != -1)
+            if valid_pd_dd_mask.any():
+                valid_logits_pd = pd_dd_logits[valid_pd_dd_mask]
+                valid_labels_pd = pd_dd[valid_pd_dd_mask]
+                loss_pd = criterion_pd(valid_logits_pd, valid_labels_pd)
+                total_loss += loss_pd
+                loss_count += 1
+                pd_loss_total += loss_pd.item()
+                pd_batch_count += 1
+
+                preds_pd = torch.argmax(valid_logits_pd, dim=1)
+                pd_dd_train_pred.extend(preds_pd.cpu().numpy())
+                pd_dd_train_labels.extend(valid_labels_pd.cpu().numpy())
+
+            # Backward pass
+            if loss_count > 0:
+                avg_loss = total_loss / loss_count
+                avg_loss.backward()
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                total_grad_norm += grad_norm.item()
+                optimizer.step()
+                train_loss += avg_loss.item()
 
         batch_count += 1
+
+        # Clear cache periodically
+        if torch.cuda.is_available() and batch_idx % 10 == 0:
+            torch.cuda.empty_cache()
 
     train_loss /= len(dataloader)
     avg_grad_norm = total_grad_norm / len(dataloader)
 
-    print(f"\n[DEBUG Epoch {epoch_num}] Average gradient norm: {avg_grad_norm:.6f}")
-    print(f"[DEBUG Epoch {epoch_num}] Prediction distribution - HC: {np.bincount(hc_pd_train_pred, minlength=2)}, Labels: {np.bincount(hc_pd_train_labels, minlength=2)}")
-    print(f"[DEBUG Epoch {epoch_num}] Prediction distribution - DD: {np.bincount(pd_dd_train_pred, minlength=2)}, Labels: {np.bincount(pd_dd_train_labels, minlength=2)}")
+    # Print detailed loss breakdown
+    print(f"\n[DEBUG Epoch {epoch_num}] Training Loss Breakdown:")
+    if hc_batch_count > 0:
+        print(f"  HC vs PD average loss: {hc_loss_total / hc_batch_count:.4f}")
+    if pd_batch_count > 0:
+        print(f"  PD vs DD average loss: {pd_loss_total / pd_batch_count:.4f}")
+    print(f"  Average gradient norm: {avg_grad_norm:.6f}")
+    print(f"  Prediction distribution - HC: {np.bincount(hc_pd_train_pred, minlength=2)}, Labels: {np.bincount(hc_pd_train_labels, minlength=2)}")
+    print(f"  Prediction distribution - DD: {np.bincount(pd_dd_train_pred, minlength=2)}, Labels: {np.bincount(pd_dd_train_labels, minlength=2)}")
 
     # Calculate training metrics
     train_metrics_hc = calculate_metrics(hc_pd_train_labels, hc_pd_train_pred,
                                         "Training HC vs PD", verbose=False)
     train_metrics_pd = calculate_metrics(pd_dd_train_labels, pd_dd_train_pred,
                                         "Training PD vs DD", verbose=False)
+
+    # Check model weights
+    if epoch_num % 5 == 0:
+        debug_model_weights(model, epoch_num)
 
     return train_loss, train_metrics_hc, train_metrics_pd
 
@@ -1624,25 +1826,17 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
     hc_pd_val_pred, hc_pd_val_labels, hc_pd_val_probs = [], [], []
     pd_dd_val_pred, pd_dd_val_labels, pd_dd_val_probs = [], [], []
 
-    debug_first_batch = True
-
     with torch.no_grad():
-        for batch_data, hc_pd, pd_dd, patient_texts in tqdm(dataloader, desc="Validation"):
+        for batch_idx, (batch_data, hc_pd, pd_dd, patient_texts) in enumerate(tqdm(dataloader, desc="Validation")):
             hc_pd = hc_pd.to(device)
             pd_dd = pd_dd.to(device)
-
-            # DEBUG: Print batch info for first batch
-            if debug_first_batch and epoch_num <= 2:
-                print(f"\n[DEBUG VAL Epoch {epoch_num}] Batch 0 - HC labels: {hc_pd.cpu().numpy()}")
-                print(f"[DEBUG VAL Epoch {epoch_num}] Batch 0 - DD labels: {pd_dd.cpu().numpy()}")
 
             text_input = patient_texts if use_text else None
             hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
 
-            # DEBUG: Print logits for first batch
-            if debug_first_batch and epoch_num <= 2:
-                print(f"[DEBUG VAL Epoch {epoch_num}] HC logits sample: {hc_pd_logits[:2].cpu().numpy()}")
-                print(f"[DEBUG VAL Epoch {epoch_num}] DD logits sample: {pd_dd_logits[:2].cpu().numpy()}")
+            # Debug print every 10 batches
+            if epoch_num <= 3:
+                debug_print_batch_info(batch_idx, hc_pd, pd_dd, hc_pd_logits, pd_dd_logits, "Validation")
 
             total_loss = 0
             loss_count = 0
@@ -1659,11 +1853,6 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
                 preds_hc = torch.argmax(valid_logits_hc, dim=1)
                 probs_hc = F.softmax(valid_logits_hc, dim=1)[:, 1]
 
-                # DEBUG: Print predictions for first batch
-                if debug_first_batch and epoch_num <= 2:
-                    print(f"[DEBUG VAL Epoch {epoch_num}] HC predictions: {preds_hc.cpu().numpy()}, labels: {valid_labels_hc.cpu().numpy()}")
-                    print(f"[DEBUG VAL Epoch {epoch_num}] HC probs: {probs_hc.cpu().numpy()}")
-
                 hc_pd_val_pred.extend(preds_hc.cpu().numpy())
                 hc_pd_val_labels.extend(valid_labels_hc.cpu().numpy())
                 hc_pd_val_probs.extend(probs_hc.cpu().numpy())
@@ -1679,12 +1868,6 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
 
                 preds_pd = torch.argmax(valid_logits_pd, dim=1)
                 probs_pd = F.softmax(valid_logits_pd, dim=1)[:, 1]
-
-                # DEBUG: Print predictions for first batch
-                if debug_first_batch and epoch_num <= 2:
-                    print(f"[DEBUG VAL Epoch {epoch_num}] DD predictions: {preds_pd.cpu().numpy()}, labels: {valid_labels_pd.cpu().numpy()}")
-                    print(f"[DEBUG VAL Epoch {epoch_num}] DD probs: {probs_pd.cpu().numpy()}")
-                    debug_first_batch = False
 
                 pd_dd_val_pred.extend(preds_pd.cpu().numpy())
                 pd_dd_val_labels.extend(valid_labels_pd.cpu().numpy())
@@ -1787,7 +1970,10 @@ def train_model(config):
             collate_fn=collate_fn
         )
 
-        # Model - Use Model
+        # Print dataset debug information
+        debug_dataset_info(train_dataset, val_dataset, fold_idx if num_folds > 1 else None)
+
+        # Model - Use Model with enhanced features
         model = Model(
             input_dim=config['input_dim'],
             model_dim=config['model_dim'],
@@ -1798,15 +1984,22 @@ def train_model(config):
             seq_len=config['seq_len'],
             num_classes=config['num_classes'],
             num_tasks=config.get('num_tasks', 10),
-            use_text=config.get('use_text', False)
+            use_text=config.get('use_text', False),
+            use_gradient_checkpointing=config.get('use_gradient_checkpointing', True),
+            max_windows_per_chunk=config.get('max_windows_per_chunk', 50)
         ).to(device)
 
-        print(f"\nModel: Model")
+        print(f"\nModel: Enhanced Model with Batch Norm + Gradient Checkpointing")
         print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
 
         optimizer = optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
 
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
+
+        # Initialize gradient scaler for mixed precision training
+        scaler = torch.cuda.amp.GradScaler() if config.get('use_amp', False) and torch.cuda.is_available() else None
+        if scaler:
+            print("Using mixed precision training (AMP)")
 
         hc_pd_loss = nn.CrossEntropyLoss()
         pd_dd_loss = nn.CrossEntropyLoss()
@@ -1835,7 +2028,7 @@ def train_model(config):
             #############Training phase###########
             train_loss, train_metrics_hc, train_metrics_pd = train__single_epoch(
                 model, train_loader, hc_pd_loss, pd_dd_loss, optimizer,
-                device, config.get('use_text', False), epoch_num=epoch+1
+                device, config.get('use_text', False), epoch_num=epoch+1, scaler=scaler
             )
 
             ###########Validation phase############
