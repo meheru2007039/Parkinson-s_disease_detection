@@ -34,6 +34,111 @@ warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore")
 
 # ============================================================================
+# DEBUGGING HELPERS
+# ============================================================================
+
+def debug_print_batch_info(batch_idx, hc_pd, pd_dd, hc_pd_logits, pd_dd_logits, phase="Training"):
+    """Print detailed batch information for debugging"""
+    if batch_idx % 10 == 0:  # Print every 10 batches
+        print(f"\n[DEBUG {phase} Batch {batch_idx}]")
+
+        # HC vs PD info
+        valid_hc_pd = (hc_pd != -1)
+        if valid_hc_pd.any():
+            valid_labels = hc_pd[valid_hc_pd]
+            valid_logits = hc_pd_logits[valid_hc_pd]
+            preds = torch.argmax(valid_logits, dim=1)
+            probs = F.softmax(valid_logits, dim=1)
+
+            print(f"  HC vs PD:")
+            print(f"    Labels: {valid_labels.cpu().numpy()}")
+            print(f"    Predictions: {preds.cpu().numpy()}")
+            print(f"    Label distribution: 0={torch.sum(valid_labels==0).item()}, 1={torch.sum(valid_labels==1).item()}")
+            print(f"    Pred distribution: 0={torch.sum(preds==0).item()}, 1={torch.sum(preds==1).item()}")
+            print(f"    Logits range: [{valid_logits.min().item():.3f}, {valid_logits.max().item():.3f}]")
+            print(f"    Prob class 0: mean={probs[:, 0].mean().item():.3f}, std={probs[:, 0].std().item():.3f}")
+            print(f"    Prob class 1: mean={probs[:, 1].mean().item():.3f}, std={probs[:, 1].std().item():.3f}")
+
+        # PD vs DD info
+        valid_pd_dd = (pd_dd != -1)
+        if valid_pd_dd.any():
+            valid_labels = pd_dd[valid_pd_dd]
+            valid_logits = pd_dd_logits[valid_pd_dd]
+            preds = torch.argmax(valid_logits, dim=1)
+            probs = F.softmax(valid_logits, dim=1)
+
+            print(f"  PD vs DD:")
+            print(f"    Labels: {valid_labels.cpu().numpy()}")
+            print(f"    Predictions: {preds.cpu().numpy()}")
+            print(f"    Label distribution: 0={torch.sum(valid_labels==0).item()}, 1={torch.sum(valid_labels==1).item()}")
+            print(f"    Pred distribution: 0={torch.sum(preds==0).item()}, 1={torch.sum(preds==1).item()}")
+            print(f"    Logits range: [{valid_logits.min().item():.3f}, {valid_logits.max().item():.3f}]")
+            print(f"    Prob class 0: mean={probs[:, 0].mean().item():.3f}, std={probs[:, 0].std().item():.3f}")
+            print(f"    Prob class 1: mean={probs[:, 1].mean().item():.3f}, std={probs[:, 1].std().item():.3f}")
+
+def debug_model_weights(model, epoch):
+    """Check if model weights are changing"""
+    if epoch % 5 == 0:  # Check every 5 epochs
+        print(f"\n[DEBUG Model Weights at Epoch {epoch}]")
+
+        # Check classification heads
+        for name, param in model.head_hc_vs_pd.named_parameters():
+            if 'weight' in name:
+                print(f"  HC vs PD head {name}: mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+
+        for name, param in model.head_pd_vs_dd.named_parameters():
+            if 'weight' in name:
+                print(f"  PD vs DD head {name}: mean={param.mean().item():.6f}, std={param.std().item():.6f}")
+
+        # Check gradients
+        hc_grad_norm = 0
+        pd_grad_norm = 0
+        for param in model.head_hc_vs_pd.parameters():
+            if param.grad is not None:
+                hc_grad_norm += param.grad.data.norm(2).item()
+        for param in model.head_pd_vs_dd.parameters():
+            if param.grad is not None:
+                pd_grad_norm += param.grad.data.norm(2).item()
+
+        print(f"  HC vs PD head gradient norm: {hc_grad_norm:.6f}")
+        print(f"  PD vs DD head gradient norm: {pd_grad_norm:.6f}")
+
+def debug_dataset_info(train_dataset, val_dataset, fold_idx=None):
+    """Print dataset statistics"""
+    print(f"\n[DEBUG Dataset Info{' Fold ' + str(fold_idx+1) if fold_idx is not None else ''}]")
+
+    # Count labels in training set
+    train_hc = np.sum(train_dataset.hc_vs_pd == 0)
+    train_pd_only = np.sum((train_dataset.hc_vs_pd == 1) & (train_dataset.pd_vs_dd == 0))
+    train_dd = np.sum(train_dataset.pd_vs_dd == 1)
+
+    val_hc = np.sum(val_dataset.hc_vs_pd == 0)
+    val_pd_only = np.sum((val_dataset.hc_vs_pd == 1) & (val_dataset.pd_vs_dd == 0))
+    val_dd = np.sum(val_dataset.pd_vs_dd == 1)
+
+    print(f"  Training set: {len(train_dataset)} samples")
+    print(f"    HC: {train_hc}, PD: {train_pd_only}, DD: {train_dd}")
+    print(f"    HC vs PD task: HC={train_hc}, PD={train_pd_only}")
+    print(f"    PD vs DD task: PD={train_pd_only}, DD={train_dd}")
+
+    print(f"  Validation set: {len(val_dataset)} samples")
+    print(f"    HC: {val_hc}, PD: {val_pd_only}, DD: {val_dd}")
+    print(f"    HC vs PD task: HC={val_hc}, PD={val_pd_only}")
+    print(f"    PD vs DD task: PD={val_pd_only}, DD={val_dd}")
+
+    # Check class balance
+    train_hc_pd_ratio = train_pd_only / (train_hc + 0.001)
+    val_hc_pd_ratio = val_pd_only / (val_hc + 0.001)
+    train_pd_dd_ratio = train_dd / (train_pd_only + 0.001)
+    val_pd_dd_ratio = val_dd / (val_pd_only + 0.001)
+
+    print(f"\n  Class imbalance ratios:")
+    print(f"    Train HC vs PD: {train_hc_pd_ratio:.2f}:1 (PD:HC)")
+    print(f"    Val HC vs PD: {val_hc_pd_ratio:.2f}:1 (PD:HC)")
+    print(f"    Train PD vs DD: {train_pd_dd_ratio:.2f}:1 (DD:PD)")
+    print(f"    Val PD vs DD: {val_pd_dd_ratio:.2f}:1 (DD:PD)")
+
+# ============================================================================
 # EVALUATION AND METRICS
 # ============================================================================
 
@@ -79,7 +184,13 @@ def calculate_metrics(y_true, y_pred, task_name="", verbose=True):
         
         print("Confusion Matrix:")
         print(cm)
-    
+
+        # DEBUG: Additional analysis when model predicts only one class
+        unique_preds = np.unique(y_pred)
+        if len(unique_preds) == 1:
+            print(f"[WARNING] Model is only predicting class {unique_preds[0]}!")
+            print(f"True label distribution: {dict(zip(*np.unique(y_true, return_counts=True)))}")
+
     return metrics
 
 def save_fold_metric(fold_idx, fold_suffix, best_epoch, best_val_acc,
@@ -232,25 +343,6 @@ def plot_roc_curves(labels, predictions, probabilities, output_path):
     plt.tight_layout()
     plt.savefig(output_path, dpi=300, bbox_inches='tight')
     plt.close()
-
-def plot_loss(history, output_path):
-    """Plot training and validation loss curves"""
-    plt.figure(figsize=(10, 6))
-
-    epochs = range(1, len(history['train_loss']) + 1)
-
-    plt.plot(epochs, history['train_loss'], 'b-', label='Training Loss', linewidth=2)
-    plt.plot(epochs, history['val_loss'], 'r-', label='Validation Loss', linewidth=2)
-
-    plt.xlabel('Epoch', fontsize=12)
-    plt.ylabel('Loss', fontsize=12)
-    plt.title('Training and Validation Loss', fontsize=14, fontweight='bold')
-    plt.legend(loc='upper right', fontsize=10)
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    plt.savefig(output_path, dpi=300, bbox_inches='tight')
-    plt.close()
-    print(f"Loss plot saved to {output_path}")
 
 def plot_tsne(features, hc_pd_labels, pd_dd_labels, output_dir="plots"):
     
@@ -559,6 +651,10 @@ class CrossAttention(nn.Module):
 
 
 class Model(nn.Module):
+    """
+    - Level 1 (Window-level): Cross-attention between left and right wrist for each window
+    - Level 2 (Task-level): Attention across windows within each task, with task embeddings
+    """
     def __init__(
         self,
         input_dim: int = 6,
@@ -635,11 +731,12 @@ class Model(nn.Module):
         else:
             fusion_dim = model_dim * 2
 
-        # ===== Classification heads =====
+        # ===== Classification heads with batch normalization =====
         self.head_hc_vs_pd = nn.Sequential(
             nn.Linear(fusion_dim, model_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
+            nn.BatchNorm1d(model_dim),  # Add batch norm for stability
             nn.Linear(model_dim, 2)  # Binary: HC vs PD
         )
 
@@ -647,16 +744,38 @@ class Model(nn.Module):
             nn.Linear(fusion_dim, model_dim),
             nn.ReLU(),
             nn.Dropout(dropout),
+            nn.BatchNorm1d(model_dim),  # Add batch norm for stability
             nn.Linear(model_dim, 2)  # Binary: PD vs DD
         )
 
+        # Initialize classification heads properly
+        self._init_classification_heads()
+
         self.dropout = nn.Dropout(dropout)
 
+    def _init_classification_heads(self):
+        """Initialize classification heads with small random weights"""
+        for module in [self.head_hc_vs_pd, self.head_pd_vs_dd]:
+            for layer in module:
+                if isinstance(layer, nn.Linear):
+                    nn.init.xavier_normal_(layer.weight, gain=0.1)
+                    if layer.bias is not None:
+                        nn.init.zeros_(layer.bias)
+
     def process_window(self, left_wrist, right_wrist):
-        
+        """
+        Process windows through window-level cross-attention with chunking.
+
+        Args:
+            left_wrist: (num_windows, seq_len, input_dim)
+            right_wrist: (num_windows, seq_len, input_dim)
+
+        Returns:
+            window_embedding: (num_windows, model_dim * 2)
+        """
         num_windows = left_wrist.size(0)
 
-        # Process in chunks if number of windows exceeds threshold
+        # Process in chunks if too many windows
         if num_windows > self.max_windows_per_chunk:
             window_embeddings = []
             for i in range(0, num_windows, self.max_windows_per_chunk):
@@ -672,7 +791,8 @@ class Model(nn.Module):
             return self._process_window_chunk(left_wrist, right_wrist)
 
     def _process_window_chunk(self, left_wrist, right_wrist):
-        
+        """Process a chunk of windows"""
+        # Project to model dimension
         left_encoded = self.left_projection(left_wrist)
         right_encoded = self.right_projection(right_wrist)
 
@@ -683,19 +803,20 @@ class Model(nn.Module):
         left_encoded = self.dropout(left_encoded)
         right_encoded = self.dropout(right_encoded)
 
-        # Apply window-level cross-attention
+        # Apply window-level cross-attention layers with optional gradient checkpointing
         for layer in self.window_layers:
             if self.use_gradient_checkpointing and self.training:
-                # Use gradient checkpointing to save memory
                 left_encoded, right_encoded = torch.utils.checkpoint.checkpoint(
                     layer, left_encoded, right_encoded, use_reentrant=False
                 )
             else:
                 left_encoded, right_encoded = layer(left_encoded, right_encoded)
 
+        # Global pooling
         left_pool = self.global_pool(left_encoded.transpose(1, 2)).squeeze(-1)
         right_pool = self.global_pool(right_encoded.transpose(1, 2)).squeeze(-1)
 
+        # Concatenate left and right embeddings
         window_embedding = torch.cat([left_pool, right_pool], dim=1)
 
         return window_embedding
@@ -711,27 +832,34 @@ class Model(nn.Module):
             task_ids = sample['task_ids'].to(device)  # (num_windows,)
 
             # ===== Level 1: Window-level processing =====
+            # Process all windows through window-level cross-attention
             window_embeddings = self.process_window(left_windows, right_windows)  # (num_windows, model_dim * 2)
 
             # ===== Level 2: Task-level processing =====
+            # Group windows by task and add task embeddings
             unique_tasks = torch.unique(task_ids)
             task_representations = []
 
             for task_id in unique_tasks:
-                
+                # Get windows for this task
                 task_mask = task_ids == task_id
                 task_windows = window_embeddings[task_mask]  # (num_task_windows, model_dim * 2)
 
+                # Get task embedding
                 task_emb = self.task_embedding(task_id.unsqueeze(0))  # (1, model_dim * 2)
 
+                # Concatenate task embedding with window embeddings
+                # Add task embedding to each window
                 task_windows_with_emb = task_windows + task_emb  # Broadcasting
 
+                # Average pool windows for this task
                 task_rep = task_windows_with_emb.mean(dim=0, keepdim=True)  # (1, model_dim * 2)
                 task_representations.append(task_rep)
 
-            # Stack task 
+            # Stack task representations
             task_sequence = torch.cat(task_representations, dim=0)  # (num_tasks, model_dim * 2)
 
+            # Apply task-level attention
             task_attended, _ = self.task_attention(
                 task_sequence.unsqueeze(0),
                 task_sequence.unsqueeze(0),
@@ -975,11 +1103,15 @@ def k_fold_split_method(data_root, full_dataset, k=5):
 
 def patient_level_split_method(left_samples, right_samples, hc_vs_pd, pd_vs_dd, 
                                patient_texts, patient_ids, split_ratio=0.85):
-    
+    """
+    Split data at patient level using stratified sampling to maintain class balance.
+    """
+    # Get unique patients and their labels
     unique_patients = np.unique(patient_ids)
     patient_labels = []
     
     for pid in unique_patients:
+        # Get the label for this patient (all samples from same patient have same label)
         patient_mask = patient_ids == pid
         hc_vs_pd_label = hc_vs_pd[patient_mask][0]
         pd_vs_dd_label = pd_vs_dd[patient_mask][0]
@@ -1066,7 +1198,11 @@ def task_wise_split_method(left_samples, right_samples, hc_vs_pd, pd_vs_dd,
     return train_data, test_data
 
 class ParkinsonsDataLoader(Dataset):
-    
+    """
+    Hierarchical data loader that groups windows by patient and task.
+
+    Each sample represents one patient with all their windows grouped by task.
+    """
     def __init__(self, data_root: str = None, window_size: int = 256,
                  left_samples=None, right_samples=None,
                  hc_vs_pd=None, pd_vs_dd=None, patient_texts=None,
@@ -1333,9 +1469,9 @@ class ParkinsonsDataLoader(Dataset):
                 task_names=test_data['task_names']
             )
 
-            print(f"\npatient-level split:")
-            print(f"  Train: {len(train_patients)} patient")
-            print(f"  Test: {len(test_patients)} patients")
+            print(f"\nHierarchical patient-level split:")
+            print(f"  Train: {len(train_patients)} patients, {len(train_dataset)} samples")
+            print(f"  Test: {len(test_patients)} patients, {len(test_dataset)} samples")
 
             return train_dataset, test_dataset
 
@@ -1390,7 +1526,7 @@ class ParkinsonsDataLoader(Dataset):
                     task_names=test_data['task_names']
                 )
 
-                print(f"\nFold {fold_id+1}/{k}:")
+                print(f"\nHierarchical Fold {fold_id+1}/{k}:")
                 print(f"  Train: {len(train_patients)} patients, {len(train_dataset)} samples")
                 print(f"  Test: {len(test_patients)} patients, {len(test_dataset)} samples")
 
@@ -1496,6 +1632,10 @@ def extract_features(model, dataloader, device, use_text):
     return all_features, all_hc_pd_labels, all_pd_dd_labels
 
 def collate_fn(batch):
+    """
+    Custom collate function for hierarchical data loader.
+    Since each patient has different number of windows, we return a list.
+    """
     batch_data = []
     hc_vs_pd_labels = []
     pd_vs_dd_labels = []
@@ -1518,11 +1658,20 @@ def collate_fn(batch):
     return batch_data, hc_vs_pd_labels, pd_vs_dd_labels, patient_texts
 
 
-def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer, device, use_text, scaler=None):
+def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer, device, use_text, epoch_num=0, scaler=None):
+    """Train hierarchical model for one epoch"""
     model.train()
     train_loss = 0.0
     hc_pd_train_pred, hc_pd_train_labels = [], []
     pd_dd_train_pred, pd_dd_train_labels = [], []
+
+    # Debugging variables
+    batch_count = 0
+    total_grad_norm = 0.0
+    hc_loss_total = 0.0
+    pd_loss_total = 0.0
+    hc_batch_count = 0
+    pd_batch_count = 0
 
     for batch_idx, (batch_data, hc_pd, pd_dd, patient_texts) in enumerate(tqdm(dataloader, desc="Training")):
         hc_pd = hc_pd.to(device)
@@ -1531,10 +1680,14 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
         optimizer.zero_grad()
         text_input = patient_texts if use_text else None
 
-        # Use mixed precision if scaler is provided
+        # Use mixed precision if scaler provided
         if scaler is not None:
             with torch.cuda.amp.autocast():
                 hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
+
+                # Debug print every 10 batches
+                if epoch_num <= 3:
+                    debug_print_batch_info(batch_idx, hc_pd, pd_dd, hc_pd_logits, pd_dd_logits, "Training")
 
                 total_loss = 0
                 loss_count = 0
@@ -1547,6 +1700,12 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
                     loss_hc = criterion_hc(valid_logits_hc, valid_labels_hc)
                     total_loss += loss_hc
                     loss_count += 1
+                    hc_loss_total += loss_hc.item()
+                    hc_batch_count += 1
+
+                    preds_hc = torch.argmax(valid_logits_hc, dim=1)
+                    hc_pd_train_pred.extend(preds_hc.cpu().numpy())
+                    hc_pd_train_labels.extend(valid_labels_hc.cpu().numpy())
 
                 # PD vs DD loss
                 valid_pd_dd_mask = (pd_dd != -1)
@@ -1556,33 +1715,35 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
                     loss_pd = criterion_pd(valid_logits_pd, valid_labels_pd)
                     total_loss += loss_pd
                     loss_count += 1
+                    pd_loss_total += loss_pd.item()
+                    pd_batch_count += 1
+
+                    preds_pd = torch.argmax(valid_logits_pd, dim=1)
+                    pd_dd_train_pred.extend(preds_pd.cpu().numpy())
+                    pd_dd_train_labels.extend(valid_labels_pd.cpu().numpy())
 
                 if loss_count > 0:
                     avg_loss = total_loss / loss_count
                 else:
                     avg_loss = total_loss
 
+            # Backward pass with gradient scaling
             if loss_count > 0:
                 scaler.scale(avg_loss).backward()
                 scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                total_grad_norm += grad_norm.item()
                 scaler.step(optimizer)
                 scaler.update()
                 train_loss += avg_loss.item()
 
-                with torch.no_grad():
-                    if valid_hc_pd_mask.any():
-                        preds_hc = torch.argmax(hc_pd_logits[valid_hc_pd_mask], dim=1)
-                        hc_pd_train_pred.extend(preds_hc.cpu().numpy())
-                        hc_pd_train_labels.extend(hc_pd[valid_hc_pd_mask].cpu().numpy())
-
-                    if valid_pd_dd_mask.any():
-                        preds_pd = torch.argmax(pd_dd_logits[valid_pd_dd_mask], dim=1)
-                        pd_dd_train_pred.extend(preds_pd.cpu().numpy())
-                        pd_dd_train_labels.extend(pd_dd[valid_pd_dd_mask].cpu().numpy())
         else:
             # Standard training without mixed precision
             hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
+
+            # Debug print every 10 batches
+            if epoch_num <= 3:
+                debug_print_batch_info(batch_idx, hc_pd, pd_dd, hc_pd_logits, pd_dd_logits, "Training")
 
             total_loss = 0
             loss_count = 0
@@ -1595,6 +1756,8 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
                 loss_hc = criterion_hc(valid_logits_hc, valid_labels_hc)
                 total_loss += loss_hc
                 loss_count += 1
+                hc_loss_total += loss_hc.item()
+                hc_batch_count += 1
 
                 preds_hc = torch.argmax(valid_logits_hc, dim=1)
                 hc_pd_train_pred.extend(preds_hc.cpu().numpy())
@@ -1608,6 +1771,8 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
                 loss_pd = criterion_pd(valid_logits_pd, valid_labels_pd)
                 total_loss += loss_pd
                 loss_count += 1
+                pd_loss_total += loss_pd.item()
+                pd_batch_count += 1
 
                 preds_pd = torch.argmax(valid_logits_pd, dim=1)
                 pd_dd_train_pred.extend(preds_pd.cpu().numpy())
@@ -1617,15 +1782,29 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
             if loss_count > 0:
                 avg_loss = total_loss / loss_count
                 avg_loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+                total_grad_norm += grad_norm.item()
                 optimizer.step()
                 train_loss += avg_loss.item()
 
-        # Clear CUDA cache periodically to prevent memory fragmentation
+        batch_count += 1
+
+        # Clear cache periodically
         if torch.cuda.is_available() and batch_idx % 10 == 0:
             torch.cuda.empty_cache()
 
     train_loss /= len(dataloader)
+    avg_grad_norm = total_grad_norm / len(dataloader)
+
+    # Print detailed loss breakdown
+    print(f"\n[DEBUG Epoch {epoch_num}] Training Loss Breakdown:")
+    if hc_batch_count > 0:
+        print(f"  HC vs PD average loss: {hc_loss_total / hc_batch_count:.4f}")
+    if pd_batch_count > 0:
+        print(f"  PD vs DD average loss: {pd_loss_total / pd_batch_count:.4f}")
+    print(f"  Average gradient norm: {avg_grad_norm:.6f}")
+    print(f"  Prediction distribution - HC: {np.bincount(hc_pd_train_pred, minlength=2)}, Labels: {np.bincount(hc_pd_train_labels, minlength=2)}")
+    print(f"  Prediction distribution - DD: {np.bincount(pd_dd_train_pred, minlength=2)}, Labels: {np.bincount(pd_dd_train_labels, minlength=2)}")
 
     # Calculate training metrics
     train_metrics_hc = calculate_metrics(hc_pd_train_labels, hc_pd_train_pred,
@@ -1633,10 +1812,15 @@ def train__single_epoch(model, dataloader, criterion_hc, criterion_pd, optimizer
     train_metrics_pd = calculate_metrics(pd_dd_train_labels, pd_dd_train_pred,
                                         "Training PD vs DD", verbose=False)
 
+    # Check model weights
+    if epoch_num % 5 == 0:
+        debug_model_weights(model, epoch_num)
+
     return train_loss, train_metrics_hc, train_metrics_pd
 
 
-def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device, use_text, use_amp=False):
+def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device, use_text, epoch_num=0):
+    """Validate hierarchical model for one epoch"""
     model.eval()
     val_loss = 0.0
     hc_pd_val_pred, hc_pd_val_labels, hc_pd_val_probs = [], [], []
@@ -1648,13 +1832,11 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
             pd_dd = pd_dd.to(device)
 
             text_input = patient_texts if use_text else None
+            hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
 
-            # Use mixed precision for inference if enabled
-            if use_amp and torch.cuda.is_available():
-                with torch.cuda.amp.autocast():
-                    hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
-            else:
-                hc_pd_logits, pd_dd_logits = model(batch_data, text_input, device)
+            # Debug print every 10 batches
+            if epoch_num <= 3:
+                debug_print_batch_info(batch_idx, hc_pd, pd_dd, hc_pd_logits, pd_dd_logits, "Validation")
 
             total_loss = 0
             loss_count = 0
@@ -1670,6 +1852,7 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
 
                 preds_hc = torch.argmax(valid_logits_hc, dim=1)
                 probs_hc = F.softmax(valid_logits_hc, dim=1)[:, 1]
+
                 hc_pd_val_pred.extend(preds_hc.cpu().numpy())
                 hc_pd_val_labels.extend(valid_labels_hc.cpu().numpy())
                 hc_pd_val_probs.extend(probs_hc.cpu().numpy())
@@ -1685,6 +1868,7 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
 
                 preds_pd = torch.argmax(valid_logits_pd, dim=1)
                 probs_pd = F.softmax(valid_logits_pd, dim=1)[:, 1]
+
                 pd_dd_val_pred.extend(preds_pd.cpu().numpy())
                 pd_dd_val_labels.extend(valid_labels_pd.cpu().numpy())
                 pd_dd_val_probs.extend(probs_pd.cpu().numpy())
@@ -1693,17 +1877,17 @@ def validate_single_epoch(model, dataloader, criterion_hc, criterion_pd, device,
                 avg_loss = total_loss / loss_count
                 val_loss += avg_loss.item()
 
-            # Clear CUDA cache periodically
-            if torch.cuda.is_available() and batch_idx % 10 == 0:
-                torch.cuda.empty_cache()
-
     val_loss /= len(dataloader)
+
+    print(f"\n[DEBUG VAL Epoch {epoch_num}] Prediction distribution - HC: {np.bincount(hc_pd_val_pred, minlength=2)}, Labels: {np.bincount(hc_pd_val_labels, minlength=2)}")
+    print(f"[DEBUG VAL Epoch {epoch_num}] Prediction distribution - DD: {np.bincount(pd_dd_val_pred, minlength=2)}, Labels: {np.bincount(pd_dd_val_labels, minlength=2)}")
 
     return (val_loss, hc_pd_val_pred, hc_pd_val_labels, hc_pd_val_probs,
             pd_dd_val_pred, pd_dd_val_labels, pd_dd_val_probs)
 
 
 def extract_features(model, dataloader, device, use_text):
+    """Extract features from hierarchical model"""
     model.eval()
     all_features = []
     all_hc_pd_labels = []
@@ -1727,11 +1911,17 @@ def extract_features(model, dataloader, device, use_text):
 
 
 def train_model(config):
+    """Train the hierarchical attention model"""
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    print("\n" + "="*70)
+    print("TRAINING HIERARCHICAL DUAL-CHANNEL TRANSFORMER")
+    print("="*70)
+
     os.makedirs("metrics", exist_ok=True)
 
-    # Load dataset 
+    # Load dataset using ParkinsonsDataLoader
     full_dataset = ParkinsonsDataLoader(
         config['data_root'],
         apply_dowsampling=config['apply_downsampling'],
@@ -1780,7 +1970,10 @@ def train_model(config):
             collate_fn=collate_fn
         )
 
-        # Model - Use Model
+        # Print dataset debug information
+        debug_dataset_info(train_dataset, val_dataset, fold_idx if num_folds > 1 else None)
+
+        # Model - Use Model with enhanced features
         model = Model(
             input_dim=config['input_dim'],
             model_dim=config['model_dim'],
@@ -1796,18 +1989,17 @@ def train_model(config):
             max_windows_per_chunk=config.get('max_windows_per_chunk', 50)
         ).to(device)
 
-        print(f"\nModel: Model")
+        print(f"\nModel: Enhanced Model with Batch Norm + Gradient Checkpointing")
         print(f"Parameters: {sum(p.numel() for p in model.parameters()):,}")
-        print(f"Gradient checkpointing: {config.get('use_gradient_checkpointing', True)}")
-        print(f"Max windows per chunk: {config.get('max_windows_per_chunk', 50)}")
-        print(f"Mixed precision (AMP): {config.get('use_amp', True) and torch.cuda.is_available()}")
 
         optimizer = optim.AdamW(model.parameters(), lr=config['learning_rate'], weight_decay=config['weight_decay'])
 
         scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5, verbose=True)
 
         # Initialize gradient scaler for mixed precision training
-        scaler = torch.cuda.amp.GradScaler() if (config.get('use_amp', True) and torch.cuda.is_available()) else None
+        scaler = torch.cuda.amp.GradScaler() if config.get('use_amp', False) and torch.cuda.is_available() else None
+        if scaler:
+            print("Using mixed precision training (AMP)")
 
         hc_pd_loss = nn.CrossEntropyLoss()
         pd_dd_loss = nn.CrossEntropyLoss()
@@ -1836,14 +2028,13 @@ def train_model(config):
             #############Training phase###########
             train_loss, train_metrics_hc, train_metrics_pd = train__single_epoch(
                 model, train_loader, hc_pd_loss, pd_dd_loss, optimizer,
-                device, config.get('use_text', False), scaler=scaler
+                device, config.get('use_text', False), epoch_num=epoch+1, scaler=scaler
             )
 
             ###########Validation phase############
             val_results = validate_single_epoch(
                 model, val_loader, hc_pd_loss, pd_dd_loss,
-                device, config.get('use_text', False),
-                use_amp=config.get('use_amp', True)
+                device, config.get('use_text', False), epoch_num=epoch+1
             )
             val_loss, hc_pd_val_pred, hc_pd_val_labels, hc_pd_val_probs, \
             pd_dd_val_pred, pd_dd_val_labels, pd_dd_val_probs = val_results
@@ -1917,7 +2108,7 @@ def train_model(config):
                     best_pd_dd_preds = np.array(pd_dd_val_pred)
                     best_pd_dd_labels = np.array(pd_dd_val_labels)
 
-                model_save_name = f'best_model{"_fold_" + str(fold_idx+1) if num_folds > 1 else ""}.pth'
+                model_save_name = f'hierarchical_best_model{"_fold_" + str(fold_idx+1) if num_folds > 1 else ""}.pth'
                 torch.save({
                     'model_state_dict': model.state_dict(),
                     'optimizer_state_dict': optimizer.state_dict(),
@@ -1934,6 +2125,7 @@ def train_model(config):
             fold_suffix = f"_fold_{fold_idx+1}" if num_folds > 1 else ""
 
             if fold_metrics_hc and fold_metrics_pd:
+                # Use CSV format instead of text
                 save_fold_metric(fold_idx, fold_suffix, best_epoch, best_val_acc,
                                     fold_metrics_hc, fold_metrics_pd)
 
@@ -1951,7 +2143,7 @@ def train_model(config):
         all_fold_results.append(fold_result)
 
         if config.get('create_plots', True):
-            plot_dir = f"plots/model_{'fold_' + str(fold_idx+1) if num_folds > 1 else 'single_run'}"
+            plot_dir = f"plots/hierarchical_{'fold_' + str(fold_idx+1) if num_folds > 1 else 'single_run'}"
             os.makedirs(plot_dir, exist_ok=True)
 
             plot_loss(history, f"{plot_dir}/loss.png")
@@ -1973,6 +2165,7 @@ def train_model(config):
 
 
 def main():
+    """Main function for training hierarchical attention model"""
 
     config = {
         # Data settings
@@ -1980,12 +2173,13 @@ def main():
         'apply_downsampling': True,
         'apply_bandpass_filter': True,
         'apply_prepare_text': False,
-        
-        
+
+        # Split settings
         'split_type': 3,  # 1=patient-level, 3=k-fold
         'split_ratio': 0.85,
         'num_folds': 5,
 
+        # Model architecture
         'input_dim': 6,
         'model_dim': 64,
         'num_heads': 8,
@@ -1994,23 +2188,18 @@ def main():
         'dropout': 0.2,
         'seq_len': 256,
         'num_classes': 2,
-        'num_tasks': 10,  # Number of tasks for task level attention
+        'num_tasks': 10,  # Number of tasks for hierarchical attention
         'use_text': False,
 
         # Training settings
-        'batch_size': 4,  
+        'batch_size': 8,  # Smaller batch size for hierarchical model (patient-level batching)
         'learning_rate': 0.0005,
         'weight_decay': 0.01,
         'num_epochs': 100,
         'num_workers': 0,
 
-        # Memory optimization settings
-        'use_amp': True,  
-        'use_gradient_checkpointing': True,  
-        'max_windows_per_chunk': 50,  
-
         # Output settings
-        'save_metrics': True,  
+        'save_metrics': True,  # Metrics will be saved as CSV
         'create_plots': True,
     }
     results = train_model(config)
